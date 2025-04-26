@@ -1,5 +1,11 @@
 use std::{
-    collections::VecDeque, fmt::Debug, hash::{BuildHasher, Hash, RandomState}, iter::{Peekable, Zip}, marker::PhantomData, ops::{Index, IndexMut}, vec
+    collections::VecDeque,
+    fmt::Debug,
+    hash::{BuildHasher, Hash, RandomState},
+    iter::{Peekable, Zip},
+    marker::PhantomData,
+    ops::{Index, IndexMut},
+    vec,
 };
 
 use node::Node;
@@ -8,18 +14,18 @@ use slotmap::{
     basic::{Values, ValuesMut},
 };
 
+mod alloc;
 mod iter;
-
 mod node;
 
 slotmap::new_key_type! { struct NodeKey; }
 
 #[derive(Debug, Clone)]
 /// A data strucur
-pub struct Trie<K, V, S = RandomState> {
+pub struct Trie<K, V> {
     /// The node pool, this is where the internal nodes are actually store. This
     /// improves cache locality and ease of access while limiting weird lifetime errors.
-    node: SlotMap<NodeKey, Node<K, V, S>>,
+    node: SlotMap<NodeKey, Node<K, V>>,
     /// The root node of the pool. This is where things actually start searching.
     root: NodeKey,
     /// The amount of items in the Trie.
@@ -62,9 +68,7 @@ impl<K, V> Default for Trie<K, V> {
     }
 }
 
-impl<K, V, S> Trie<K, V, S>
-where
-    S: BuildHasher,
+impl<K, V> Trie<K, V>
 {
     /// Creates a new [Trie] with no keys and records. This will
     /// create a [Trie] with a capacity of zero using the [Trie::with_capacity] method.
@@ -76,8 +80,6 @@ where
     /// assert_eq!(tree.len(), 0);
     /// ```
     pub fn new() -> Self
-    where
-        S: Default,
     {
         Self::with_capacity(0)
     }
@@ -90,8 +92,6 @@ where
     /// assert!(tree.is_empty());
     /// ```
     pub fn with_capacity(slots: usize) -> Self
-    where
-        S: Default,
     {
         let mut node = SlotMap::with_capacity_and_key(slots);
         let root = node.insert(Node::root());
@@ -106,7 +106,7 @@ where
     fn get_entrypoint<I>(&self, key: &mut I) -> (Option<&NodeKey>, Option<K>)
     where
         I: Iterator<Item = K>,
-        K: Hash + Eq,
+        K: Ord
     {
         match key.next() {
             Some(first) => (self.node[self.root].get(&first), Some(first)),
@@ -123,7 +123,7 @@ where
     ) -> Result<WalkTrajectory, WalkFailure<'a, Peekable<I>, K>>
     where
         I: Iterator<Item = K>,
-        K: Hash + Eq,
+        K: Ord,
     {
         let remainder = remainder;
 
@@ -176,7 +176,6 @@ where
         })
     }
 
-
     /// Looks up the node pool index for a certain key,
     /// the key is an iterator over the prefixes. For instance,
     /// for strings this would be characters. This method forms the basis
@@ -184,7 +183,7 @@ where
     fn lookup_key<I>(&self, key: I) -> Option<NodeKey>
     where
         I: IntoIterator<Item = K>,
-        K: Hash + Eq,
+        K: Ord,
     {
         Some(
             self.internal_walk(&mut key.into_iter().peekable(), false)
@@ -193,26 +192,115 @@ where
         )
     }
 
+    /// Traverses all the possible completions recursively, building
+    /// out all the possible values.
+    fn traverse_completions<'a, J>(
+        &'a self,
+        pool: &mut CompletionIter<'a, K, J>,
+        // The index of the prior completion root.
+        current: usize,
+        // The index of the current node.
+        index: NodeKey,
+    )
+    {
+        for (key, link) in &self.node[index].sub_keys {
+            let cur = Completion {
+                value: vec![key],
+                previous: Some(current),
+            };
+
+            let cur_index = pool.completion.len();
+            pool.completion.push(cur);
+
+            if self.node[*link].value().is_some() {
+                pool.traversal.push(cur_index);
+            }
+
+            self.traverse_completions(pool, cur_index, *link);
+        }
+    }
+
+    /// Gets all the completions of a key. This will
+    /// traverse the tree to the point at which the key
+    /// diverges.
+    ///
+    /// ```
+    /// use rstrie::Trie;
+    ///
+    /// let mut tree = Trie::<char, ()>::new();
+    /// tree.insert("hello".chars(), ());
+    /// tree.insert("hey".chars(), ());
+    ///
+    ///
+    /// println!("Tree: {:?}", tree);
+    ///
+    /// let mut values = tree.completions::<_, String>("he".chars())
+    ///     .into_iter()
+    ///     .collect::<Vec<_>>();
+    ///
+    /// values.sort();
+    ///
+    ///
+    /// assert_eq!(values[0], "hello");
+    /// assert_eq!(values[1], "hey");
+    /// ```
+    pub fn completions<'a, I, J>(&'a self, key: I) -> CompletionIter<'a, K, J>
+    where
+        I: IntoIterator<Item = K>,
+        K: Ord,
+        J: FromIterator<K>,
+    {
+        let mut binding = key.into_iter().peekable();
+        let Ok(result) = self.internal_walk(binding.by_ref(), true) else {
+            // There were no additional paths.
+            return CompletionIter {
+                completion: vec![],
+                _transform: PhantomData,
+                traversal: vec![],
+            };
+        };
+
+        let mut col = vec![];
+        for i in result.path {
+            let Some(word) = self.node[i].key() else {
+                continue;
+            };
+            col.push(word);
+        }
+
+        let mut pool = CompletionIter {
+            completion: vec![Completion {
+                value: col,
+                previous: None,
+            }],
+            _transform: PhantomData,
+            traversal: vec![],
+        };
+
+        self.traverse_completions(&mut pool, 0, result.end);
+
+        pool
+    }
+
     /// Reconstructs a key by traversing up the [Trie] structure.
-    /// 
+    ///
     /// This will reconstruct it into a new type that can be created from
     /// an iterator of the node key types.
     fn reconstruct_node_key<J>(&self, key: NodeKey) -> Option<J>
-    where 
-        for<'a> J: FromIterator<&'a K>
+    where
+        for<'a> J: FromIterator<&'a K>,
     {
         let mut node = &self.node[key];
 
         let mut deque = VecDeque::new();
         while node.parent().is_some() {
             deque.push_front(node.key().as_ref().unwrap());
-            
+
             node = &self.node[node.parent().unwrap()];
         }
-        
+
         Some(deque.into_iter().collect())
     }
-
 
     /// Returns an iterator over the values of the [Trie]
     /// data structure.
@@ -221,8 +309,8 @@ where
     ///
     /// let mut tree = Trie::<char, usize>::new();
     ///
-    /// tree.put("hello".chars(), 1);
-    /// tree.put("bye".chars(), 2);
+    /// tree.insert("hello".chars(), 1);
+    /// tree.insert("bye".chars(), 2);
     ///
     ///
     /// let mut values  = tree.values();
@@ -231,7 +319,7 @@ where
     /// assert_eq!(values.next().cloned(), Some(2));
     /// assert_eq!(values.next().cloned(), None);
     /// ```
-    pub fn values<'a>(&'a self) -> ValueIterRef<'a, K, V, S> {
+    pub fn values<'a>(&'a self) -> ValueIterRef<'a, K, V> {
         ValueIterRef {
             values: self.node.values(),
         }
@@ -244,8 +332,8 @@ where
     ///
     /// let mut tree = Trie::<char, usize>::new();
     ///
-    /// tree.put("hello".chars(), 1);
-    /// tree.put("bye".chars(), 2);
+    /// tree.insert("hello".chars(), 1);
+    /// tree.insert("bye".chars(), 2);
     ///
     ///
     /// let mut values  = tree.values_mut();
@@ -262,7 +350,7 @@ where
     /// // Check the value was properly mutate.
     /// assert_eq!(*tree.get("bye".chars()).unwrap(), 3);
     /// ```
-    pub fn values_mut<'a>(&'a mut self) -> ValueIterMut<'a, K, V, S> {
+    pub fn values_mut<'a>(&'a mut self) -> ValueIterMut<'a, K, V> {
         ValueIterMut {
             values: self.node.values_mut(),
         }
@@ -275,8 +363,8 @@ where
     ///
     /// let mut tree = Trie::<char, usize>::new();
     ///
-    /// tree.put("hello".chars(), 1);
-    /// tree.put("bye".chars(), 2);
+    /// tree.insert("hello".chars(), 1);
+    /// tree.insert("bye".chars(), 2);
     ///
     ///
     /// let mut values  = tree.values_mut();
@@ -302,51 +390,48 @@ where
             .collect::<Vec<Option<V>>>();
 
         ValueIter {
-            inner: iter::Iter::new(values)
+            inner: iter::Iter::new(values),
         }
     }
     /// Returns an iterator over the keys of the [Trie]
     /// data structure.
-    /// 
+    ///
     /// ```
     /// use rstrie::Trie;
-    /// 
+    ///
     /// let mut tree = Trie::<char, usize>::from([
     ///     ("hello".chars(), 4),
     ///     ("bye".chars(), 3)
     /// ]);
-    /// 
+    ///
     /// let mut key_iter = tree.keys::<String>();
-    /// 
+    ///
     /// assert_eq!(key_iter.next().unwrap(), "hello");
     /// assert_eq!(key_iter.next().unwrap(), "bye");
     /// assert!(key_iter.next().is_none());
     /// ```
     pub fn keys<J>(&self) -> KeyIter<J>
-    where 
-        for<'a> J: FromIterator<&'a K>
+    where
+        for<'a> J: FromIterator<&'a K>,
     {
         let values = self
             .node
             .iter()
             .filter(|(_, v)| v.value().is_some())
             .map(|(k, _)| k)
-            .map(|k| self.reconstruct_node_key::<J>(k))            
+            .map(|k| self.reconstruct_node_key::<J>(k))
             .collect::<Vec<Option<J>>>();
 
         KeyIter {
-            inner: iter::Iter::new(values)
+            inner: iter::Iter::new(values),
         }
     }
 
-
     fn collect_entry_partial<J>(&self) -> Vec<(J, NodeKey)>
     where
-        for<'a> J: FromIterator<&'a K>
+        for<'a> J: FromIterator<&'a K>,
     {
-
-        self
-            .node
+        self.node
             .iter()
             .filter(|(_, v)| v.value().is_some())
             .map(|(key, _)| {
@@ -358,113 +443,98 @@ where
 
     /// Returns an iterator over the entries of the [Trie]
     /// data structure.
-    /// 
+    ///
     /// ```
     /// use rstrie::Trie;
-    /// 
+    ///
     /// let mut tree = Trie::<char, usize>::from([
     ///     ("hello".chars(), 4),
     ///     ("bye".chars(), 3)
     /// ]);
-    /// 
+    ///
     /// let mut key_iter = tree.into_entries::<String>();
-    /// 
+    ///
     /// assert_eq!(key_iter.next().unwrap(), ("hello".to_string(), 4));
     /// assert_eq!(key_iter.next().unwrap(), ("bye".to_string(), 3));
     /// assert!(key_iter.next().is_none());
     /// ```
     pub fn into_entries<J>(mut self) -> EntryIter<J, V>
-    where 
-        for<'a> J: FromIterator<&'a K>
+    where
+        for<'a> J: FromIterator<&'a K>,
     {
-
         // Convert into an owned iterator.
-        let values = self.collect_entry_partial::<J>()
+        let values = self
+            .collect_entry_partial::<J>()
             .into_iter()
             .map(|(key, value)| Some((key, self.node[value].value_mut().take().unwrap())))
             .collect::<Vec<_>>();
         EntryIter {
-            inner: iter::Iter::new(values)
+            inner: iter::Iter::new(values),
         }
     }
     /// Returns an iterator over the entries of the [Trie]
     /// data structure.
-    /// 
+    ///
     /// ```
     /// use rstrie::Trie;
-    /// 
+    ///
     /// let mut tree = Trie::<char, usize>::from([
     ///     ("hello".chars(), 4),
     ///     ("bye".chars(), 3)
     /// ]);
-    /// 
+    ///
     /// let mut key_iter = tree.entries::<String>();
-    /// 
+    ///
     /// assert_eq!(key_iter.next().unwrap(), ("hello".to_string(), &4));
     /// assert_eq!(key_iter.next().unwrap(), ("bye".to_string(), &3));
     /// assert!(key_iter.next().is_none());
     /// ```
     pub fn entries<J>(&self) -> EntryIter<J, &V>
-    where 
-        for<'a> J: FromIterator<&'a K>
+    where
+        for<'a> J: FromIterator<&'a K>,
     {
-
         // Convert into an owned iterator.
-        let values = self.collect_entry_partial::<J>()
+        let values = self
+            .collect_entry_partial::<J>()
             .into_iter()
             .map(|(key, value)| Some((key, self.node[value].value().as_ref().unwrap())))
             .collect::<Vec<_>>();
         EntryIter {
-            inner: iter::Iter::new(values)
+            inner: iter::Iter::new(values),
         }
     }
 
     /// Returns an iterator over the entries of the [Trie]
     /// data structure.
-    /// 
+    ///
     /// ```
     /// use rstrie::Trie;
-    /// 
+    ///
     /// let mut tree = Trie::<char, usize>::from([
     ///     ("hello".chars(), 4),
     ///     ("bye".chars(), 3)
     /// ]);
-    /// 
+    ///
     /// let mut key_iter = tree.entries::<String>();
-    /// 
+    ///
     /// assert_eq!(key_iter.next().unwrap(), ("hello".to_string(), &4));
     /// assert_eq!(key_iter.next().unwrap(), ("bye".to_string(), &3));
     /// assert!(key_iter.next().is_none());
     /// ```
-    pub fn entries_mut<'b, J>(&'b mut self) -> EntryIterMut<'b, K, V, S, J>
-    where 
-        for<'a> J: FromIterator<&'a K>
+    pub fn entries_mut<'b, J>(&'b mut self) -> EntryIterMut<'b, K, V, J>
+    where
+        for<'a> J: FromIterator<&'a K>,
     {
-
-        // let wow = self.node.iter_mut()
-        //     .filter(|(k, value)| value.value().is_some())
-        //     .map(|(k, v)| v.)
-
-        // // Convert into an owned iterator.
-        // let values = self.collect_entry_partial::<J>()
-        //     .into_iter()
-        //     .map(|(key, value)| Some((key, self.node[value].value_mut().as_mut().unwrap())))
-        //     .collect::<Vec<_>>();
-
-        // let values = self.collect_entry_partial::<J>()
-        //     .into_iter()
-        //     .map(|(key, value)| (key, self.node[value]))
-        //     .collect::<Vec<_>>();
-
-
-
-        let keys = self.node.iter().map(|(k, _)| self.reconstruct_node_key::<J>(k)).collect::<Option<Vec<_>>>().unwrap();
-
-
+        let keys = self
+            .node
+            .iter()
+            .map(|(k, _)| self.reconstruct_node_key::<J>(k))
+            .collect::<Option<Vec<_>>>()
+            .unwrap();
 
         EntryIterMut {
             inner: keys.into_iter().zip(self.node.iter_mut()),
-            _type: PhantomData
+            _type: PhantomData,
         }
     }
 
@@ -476,13 +546,13 @@ where
     /// use rstrie::Trie;
     ///
     /// let mut tree = Trie::<char, &str>::new();
-    /// tree.put("hello".chars(), "world");
+    /// tree.insert("hello".chars(), "world");
     /// assert_eq!(*tree.get("hello".chars()).unwrap(), "world");
     /// ```
     pub fn get<I>(&self, key: I) -> Option<&V>
     where
         I: IntoIterator<Item = K>,
-        K: Hash + Eq,
+        K: Ord,
     {
         self.node[self.lookup_key(key)?].value().as_ref()
     }
@@ -495,8 +565,8 @@ where
     ///
     /// let mut tree = Trie::<char, usize>::new();
     ///
-    /// tree.put("hello".chars(), 3);
-    /// tree.put("world".chars(), 4);
+    /// tree.insert("hello".chars(), 3);
+    /// tree.insert("world".chars(), 4);
     ///
     /// let keys = tree.get_disjoint_mut([ "hello".chars(), "world".chars() ]).unwrap();
     /// *keys[0] = 4;
@@ -511,7 +581,7 @@ where
     ) -> Option<[&'a mut V; N]>
     where
         I: IntoIterator<Item = K>,
-        K: Hash + Eq,
+        K: Ord,
     {
         // Perform key lookup.
         let mut node_keys: [NodeKey; N] = [NodeKey::default(); N];
@@ -541,7 +611,7 @@ where
     /// use rstrie::Trie;
     ///
     /// let mut tree = Trie::<char, &str>::new();
-    /// tree.put("hello".chars(), "world");
+    /// tree.insert("hello".chars(), "world");
     /// assert_eq!(*tree.get_mut("hello".chars()).unwrap(), "world");
     ///
     /// *tree.get_mut("hello".chars()).unwrap() = "world2";
@@ -550,7 +620,7 @@ where
     pub fn get_mut<I>(&mut self, key: I) -> Option<&mut V>
     where
         I: IntoIterator<Item = K>,
-        K: Hash + Eq,
+        K: Ord,
     {
         let index = self.lookup_key(key)?;
         self.node[index].value_mut().as_mut()
@@ -562,7 +632,7 @@ where
     /// use rstrie::Trie;
     ///
     /// let mut tree = Trie::<char, &str>::new();
-    /// tree.put("hello".chars(), "world");
+    /// tree.insert("hello".chars(), "world");
     /// assert_eq!(tree.len(), 1);
     /// ```
     pub fn len(&self) -> usize {
@@ -577,7 +647,7 @@ where
     /// let mut tree = Trie::<char, &str>::new();
     /// assert!(tree.is_empty());
     ///
-    /// tree.put("hello".chars(), "world");
+    /// tree.insert("hello".chars(), "world");
     /// assert!(!tree.is_empty());
     ///
     /// ```
@@ -592,15 +662,13 @@ where
     /// let mut tree = Trie::<char, usize>::new();
     /// assert!(tree.is_empty());
     ///
-    /// tree.put("hello".chars(), 0);
+    /// tree.insert("hello".chars(), 0);
     /// assert!(!tree.is_empty());
     ///
     /// tree.clear();
     /// assert!(tree.is_empty());
     /// ```
     pub fn clear(&mut self)
-    where
-        S: Default,
     {
         self.node.clear();
         self.root = self.node.insert(Node::root());
@@ -620,15 +688,14 @@ where
     /// use rstrie::Trie;
     ///
     /// let mut tree = Trie::<char, usize>::new();
-    /// tree.put("hello".chars(), 12);
+    /// tree.insert("hello".chars(), 12);
     ///
     /// assert_eq!(tree.remove("hello".chars()).unwrap(), 12);
     /// ```
     pub fn remove<I>(&mut self, master: I) -> Option<V>
     where
         I: IntoIterator<Item = K>,
-        K: Hash + Eq + Copy,
-        S: Default,
+        K: Ord + Copy,
     {
         let trajectory = self
             .internal_walk(master.into_iter().peekable().by_ref(), true)
@@ -671,7 +738,7 @@ where
     pub fn contains_key<I>(&self, master: I) -> bool
     where
         I: Iterator<Item = K>,
-        K: Hash + Eq + Debug,
+        K: Ord,
     {
         self.get(master).is_some()
     }
@@ -683,7 +750,7 @@ where
     /// use rstrie::Trie;
     ///
     /// let mut tree = Trie::<char, usize>::new();
-    /// tree.put("hello".chars(), 12);
+    /// tree.insert("hello".chars(), 12);
     ///
     /// assert!(tree.contains_value(&12));
     /// assert!(!tree.contains_value(&11));
@@ -711,19 +778,18 @@ where
     /// use rstrie::Trie;
     ///
     /// let mut tree = Trie::<char, usize>::new();
-    /// tree.put("hello".chars(), 1);
+    /// tree.insert("hello".chars(), 1);
     ///
     /// // Verify the key is in the tree.
     /// assert_eq!(*tree.get("hello".chars()).unwrap(), 1);
     ///
     /// // Verify the key replacement.
-    /// assert_eq!(tree.put("hello".chars(), 2).unwrap(), 1);
+    /// assert_eq!(tree.insert("hello".chars(), 2).unwrap(), 1);
     /// ```
-    pub fn put<I>(&mut self, master: I, value: V) -> Option<V>
+    pub fn insert<I>(&mut self, master: I, value: V) -> Option<V>
     where
         I: IntoIterator<Item = K>,
-        K: Clone + Hash + Eq,
-        S: Default,
+        K: Clone + Ord
     {
         let master = master.into_iter();
 
@@ -746,11 +812,9 @@ where
                 } else {
                     // Make a new node.
                     let new_node = Node::keyed(first.clone().unwrap(), self.root);
-            
+
                     let new_key = self.node.insert(new_node);
-                    self.node[self.root]
-                        
-                        .insert(first.clone().unwrap(), new_key);
+                    self.node[self.root].insert(first.clone().unwrap(), new_key);
                     new_key
                 };
 
@@ -774,19 +838,71 @@ where
 }
 
 
+#[derive(Debug)]
+pub struct CompletionIter<'a, K, J> {
+    /// The list of completions, this functions as a bump
+    /// allocator and is used to build out the list.
+    completion: Vec<Completion<'a, K>>,
 
-// impl<K, V, S> PartialEq for Trie<K, V, S> {
-//     fn eq(&self, other: &Self) -> bool {
+    traversal: Vec<usize>,
 
-//         true
-//     }
-// }
+    /// The value to which the iterators will be transformed during iteration.
+    _transform: PhantomData<J>,
+}
 
-impl<K, V, S, I> Index<I> for Trie<K, V, S>
+#[derive(Debug)]
+struct Completion<'a, K> {
+    /// The actual underlying values.
+    value: Vec<&'a K>,
+    /// Stores the continuations.
+    previous: Option<usize>,
+}
+
+impl<'a, K: Debug, J> Iterator for CompletionIter<'a, K, J>
 where
-    K: Hash + Eq,
+    J: FromIterator<&'a K>,
+{
+    type Item = J;
+
+    /// Gets the next completion. This is comptued lazily.
+    /// 
+    /// ```
+    /// use rstrie::Trie;
+    ///
+    /// let mut tree = Trie::<char, ()>::new();
+    /// tree.insert("hello".chars(), ());
+    /// tree.insert("hey".chars(), ());
+    ///
+    ///
+    /// let mut values = tree.completions::<_, String>("he".chars())
+    ///     .into_iter()
+    ///     .collect::<Vec<_>>();
+    ///
+    /// values.sort();
+    ///
+    ///
+    /// assert_eq!(values[0], "hello");
+    /// assert_eq!(values[1], "hey");
+    /// ```
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut verbiage = VecDeque::new();
+
+        let mut current = Some(self.traversal.pop()?);
+        while current.is_some() {
+            let current_node = &self.completion[current?];
+
+            verbiage.extend(current_node.value.iter().rev());
+            current = self.completion[current?].previous;
+        }
+
+        Some(verbiage.into_iter().rev().collect::<J>())
+    }
+}
+
+impl<K, V, I> Index<I> for Trie<K, V>
+where
+    K: Ord,
     I: IntoIterator<Item = K>,
-    S: BuildHasher + Default,
 {
     type Output = V;
 
@@ -806,11 +922,10 @@ where
     }
 }
 
-impl<K, V, S, I> IndexMut<I> for Trie<K, V, S>
+impl<K, V, I> IndexMut<I> for Trie<K, V>
 where
-    K: Hash + Eq,
+    K: Ord,
     I: IntoIterator<Item = K>,
-    S: BuildHasher + Default,
 {
     /// Indexes mutably into the [Trie] using an iterator index.
     ///
@@ -833,73 +948,68 @@ where
 /// An iterator created by consuming the [Trie].
 ///
 /// Contains all the entries of the [Trie].
-pub struct EntryIterMut<'a, K, V, S, J> {
-    inner: Zip<vec::IntoIter<J>, slotmap::basic::IterMut<'a, NodeKey, Node<K, V, S>>>,
-    _type: PhantomData<J>
+pub struct EntryIterMut<'a, K, V, J> {
+    inner: Zip<vec::IntoIter<J>, slotmap::basic::IterMut<'a, NodeKey, Node<K, V>>>,
+    _type: PhantomData<J>,
 }
-
-
-
 
 /// An iterator created by consuming the [Trie].
 ///
 /// Contains all the entries of the [Trie].
 pub struct EntryIter<J, V> {
-    inner: crate::iter::Iter<(J, V)>
+    inner: crate::iter::Iter<(J, V)>,
 }
-
 
 /// An iterator created by consuming the [Trie].
 ///
 /// Contains all the keys of the [Trie].
 pub struct KeyIter<J> {
-    inner: crate::iter::Iter<J>
+    inner: crate::iter::Iter<J>,
 }
-
 
 /// An iterator created by consuming the [Trie].
 ///
 /// Contains all the elements of the [Trie].
 pub struct ValueIter<V> {
-    inner: crate::iter::Iter<V>
+    inner: crate::iter::Iter<V>,
 }
 
 /// An iterator over the values of a [Trie].
-pub struct ValueIterRef<'a, K, V, S> {
-    values: Values<'a, NodeKey, Node<K, V, S>>,
+pub struct ValueIterRef<'a, K, V> {
+    values: Values<'a, NodeKey, Node<K, V>>,
 }
 
 /// An iterator over the values of a [Trie]
 /// that provides mutable references.
-pub struct ValueIterMut<'a, K, V, S> {
-    values: ValuesMut<'a, NodeKey, Node<K, V, S>>,
+pub struct ValueIterMut<'a, K, V> {
+    values: ValuesMut<'a, NodeKey, Node<K, V>>,
 }
 
-impl<'a, K, V, S, J> Iterator for EntryIterMut<'a, K, V, S, J> {
+impl<'a, K, V, J> Iterator for EntryIterMut<'a, K, V, J> {
     type Item = (J, &'a mut V);
 
     /// Iterates over the mutably borrowed entries within a [Trie].
     /// ```
     /// use rstrie::Trie;
-    /// 
+    ///
     /// let mut tree = Trie::<char, usize>::from([
     ///     ("hello".chars(), 4),
     ///     ("bye".chars(), 3)
     /// ]);
-    /// 
+    ///
     /// let mut key_iter = tree.entries_mut::<String>();
-    /// 
+    ///
     /// assert_eq!(*key_iter.next().unwrap().1, 4);
     /// assert_eq!(*key_iter.next().unwrap().1, 3);
     /// assert!(key_iter.next().is_none());
-    /// 
+    ///
     /// let mut key_iter = tree.entries_mut::<String>();
-    /// 
+    ///
     /// *key_iter.next().unwrap().1 = 5;
-    /// 
-    /// 
+    ///
+    ///
     /// let mut key_iter = tree.entries_mut::<String>();
-    /// 
+    ///
     /// assert_eq!(*key_iter.next().unwrap().1, 5);
     /// assert_eq!(*key_iter.next().unwrap().1, 3);
     /// assert!(key_iter.next().is_none());
@@ -920,14 +1030,14 @@ impl<J, V> Iterator for EntryIter<J, V> {
     /// Iterates over the owned entries within a [Trie].
     /// ```
     /// use rstrie::Trie;
-    /// 
+    ///
     /// let mut tree = Trie::<char, usize>::from([
     ///     ("hello".chars(), 4),
     ///     ("bye".chars(), 3)
     /// ]);
-    /// 
+    ///
     /// let mut key_iter = tree.into_entries::<String>();
-    /// 
+    ///
     /// assert_eq!(key_iter.next().unwrap(), ("hello".to_string(), 4));
     /// assert_eq!(key_iter.next().unwrap(), ("bye".to_string(), 3));
     /// assert!(key_iter.next().is_none());
@@ -947,8 +1057,8 @@ impl<J> Iterator for KeyIter<J> {
     ///
     /// let mut tree = Trie::<char, usize>::new();
     ///
-    /// tree.put("hello".chars(), 1);
-    /// tree.put("bye".chars(), 2);
+    /// tree.insert("hello".chars(), 1);
+    /// tree.insert("bye".chars(), 2);
     ///
     ///
     /// let mut values  = tree.keys::<String>();
@@ -972,8 +1082,8 @@ impl<V> Iterator for ValueIter<V> {
     ///
     /// let mut tree = Trie::<char, usize>::new();
     ///
-    /// tree.put("hello".chars(), 1);
-    /// tree.put("bye".chars(), 2);
+    /// tree.insert("hello".chars(), 1);
+    /// tree.insert("bye".chars(), 2);
     ///
     ///
     /// let mut values  = tree.into_values();
@@ -987,7 +1097,7 @@ impl<V> Iterator for ValueIter<V> {
     }
 }
 
-impl<'a, K, V, S> Iterator for ValueIterMut<'a, K, V, S> {
+impl<'a, K, V> Iterator for ValueIterMut<'a, K, V> {
     type Item = &'a mut V;
 
     /// Iterates over the values mutably within a [Trie].
@@ -997,8 +1107,8 @@ impl<'a, K, V, S> Iterator for ValueIterMut<'a, K, V, S> {
     ///
     /// let mut tree = Trie::<char, usize>::new();
     ///
-    /// tree.put("hello".chars(), 1);
-    /// tree.put("bye".chars(), 2);
+    /// tree.insert("hello".chars(), 1);
+    /// tree.insert("bye".chars(), 2);
     ///
     ///
     /// let mut values  = tree.values_mut();
@@ -1018,7 +1128,7 @@ impl<'a, K, V, S> Iterator for ValueIterMut<'a, K, V, S> {
     }
 }
 
-impl<'a, K, V, S> Iterator for ValueIterRef<'a, K, V, S> {
+impl<'a, K, V> Iterator for ValueIterRef<'a, K, V> {
     type Item = &'a V;
 
     /// Iterates over the values within a [Trie].
@@ -1028,8 +1138,8 @@ impl<'a, K, V, S> Iterator for ValueIterRef<'a, K, V, S> {
     ///
     /// let mut tree = Trie::<char, usize>::new();
     ///
-    /// tree.put("hello".chars(), 1);
-    /// tree.put("bye".chars(), 2);
+    /// tree.insert("hello".chars(), 1);
+    /// tree.insert("bye".chars(), 2);
     ///
     ///
     /// let mut values  = tree.values();
@@ -1049,11 +1159,9 @@ impl<'a, K, V, S> Iterator for ValueIterRef<'a, K, V, S> {
     }
 }
 
-impl<KP, K, V, S> Extend<(KP, V)> for Trie<K, V, S>
+impl<KP, K, V> Extend<(KP, V)> for Trie<K, V>
 where
-    K: Eq + Hash,
-    S: BuildHasher + Default,
-    K: Hash + Eq + Clone,
+    K: Ord + Clone,
     KP: IntoIterator<Item = K>,
 {
     /// Extends a [Trie] from an iterator of tuples. The tuples must contain
@@ -1074,15 +1182,14 @@ where
     #[inline]
     fn extend<T: IntoIterator<Item = (KP, V)>>(&mut self, iter: T) {
         for (key, value) in iter {
-            self.put(key, value);
+            self.insert(key, value);
         }
     }
 }
 
-impl<KP, K, V, S> FromIterator<(KP, V)> for Trie<K, V, S>
+impl<KP, K, V> FromIterator<(KP, V)> for Trie<K, V>
 where
-    K: Eq + Hash + Clone,
-    S: BuildHasher + Default,
+    K: Ord + Clone,
     KP: IntoIterator<Item = K>,
 {
     /// Creates a [Trie] from an iterator of tuples. The tuples must contain
@@ -1106,11 +1213,10 @@ where
     }
 }
 
-impl<KP, K, V, S, const N: usize> From<[(KP, V); N]> for Trie<K, V, S>
+impl<KP, K, V, const N: usize> From<[(KP, V); N]> for Trie<K, V>
 where
-    K: Eq + Hash + Clone,
+    K: Ord + Clone,
     KP: IntoIterator<Item = K>,
-    S: BuildHasher + Default,
 {
     /// Creates a [Trie] from an array of tuples. The tuples must contain
     /// a valid key element, that is, it can be converted to an iterator
@@ -1131,16 +1237,12 @@ where
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
 
     use std::hash::RandomState;
 
-
     use super::Trie;
-
 
     #[test]
     pub fn trie_from_tuples() {
@@ -1152,8 +1254,8 @@ mod tests {
     pub fn trie_into_values() {
         let mut tree = Trie::<char, usize>::new();
 
-        tree.put("hello".chars(), 1);
-        tree.put("bye".chars(), 2);
+        tree.insert("hello".chars(), 1);
+        tree.insert("bye".chars(), 2);
 
         let mut values = tree.into_values();
 
@@ -1164,20 +1266,20 @@ mod tests {
 
     #[test]
     pub fn basic_trie_insert() {
-        let mut tree: Trie<char, &str, RandomState> = Trie::new();
-        tree.put("test".chars(), "sample_1");
+        let mut tree: Trie<char, &str> = Trie::new();
+        tree.insert("test".chars(), "sample_1");
         assert!(tree.contains_key("test".chars()));
         assert_eq!(*tree.get("test".chars()).unwrap(), "sample_1");
     }
 
     #[test]
     pub fn basic_trie_insert_multi_keys() {
-        let mut tree: Trie<char, &str, RandomState> = Trie::new();
-        tree.put("test".chars(), "sample_1");
-        // tree.put("george".chars(), "sample_2");
+        let mut tree: Trie<char, &str> = Trie::new();
+        tree.insert("test".chars(), "sample_1");
+        // tree.insert("george".chars(), "sample_2");
 
         println!("INSERTING TEA...");
-        tree.put("tea".chars(), "sample_3");
+        tree.insert("tea".chars(), "sample_3");
 
         for (key, value) in &tree.node {
             println!("({key:?}) -> {value:?}");
@@ -1194,7 +1296,7 @@ mod tests {
     #[test]
     pub fn basic_trie_deletion() {
         let mut tree: Trie<char, &str> = Trie::new();
-        tree.put("test".chars(), "sample_1");
+        tree.insert("test".chars(), "sample_1");
 
         assert_eq!(tree.len(), 1);
 
@@ -1208,8 +1310,8 @@ mod tests {
     #[test]
     pub fn trie_deletion_multikey() {
         let mut tree: Trie<char, &str> = Trie::new();
-        tree.put("test".chars(), "sample_1");
-        tree.put("tea".chars(), "sample_2");
+        tree.insert("test".chars(), "sample_1");
+        tree.insert("tea".chars(), "sample_2");
 
         assert!(tree.contains_key("test".chars()));
         assert!(tree.contains_key("tea".chars()));
@@ -1219,31 +1321,57 @@ mod tests {
         assert!(tree.contains_key("test".chars()));
     }
 
-    // #[test]
-    // pub fn parse_trie() {
-    //     let mut tree: Trie<char, &'static str> = Trie::new();
+    #[test]
+    pub fn test_arbitrary_insert() {
+        let mut tree: Trie<char, String> = Trie::new();
+        arbtest::arbtest(|u| {
+            let key: String = u.arbitrary::<[char; 32]>().unwrap().iter().collect();
+            let value: String = u.arbitrary::<[char; 32]>().unwrap().iter().collect();
+            tree.insert(key.chars(), value);
 
-    //     tree.put("test".chars(), "obama");
-    //     tree.put("tesla".chars(), "obama3");
+            assert!(tree.contains_key(key.chars()));
 
-    //     println!("INITIAL:\n");
-    //     for (key, value) in &tree.node {
-    //         println!("({key:?}) -> {value:?}");
-    //     }
+            Ok(())
+        });
+    }
 
-    //     // tree.delete("test", |f| f.chars().collect());
-    //     // tree.delete("tesla", |f| f.chars().collect());
+    #[test]
+    pub fn completions_test() {
+        let mut tree = Trie::<char, ()>::new();
+        tree.insert("hello".chars(), ());
+        tree.insert("hey".chars(), ());
 
-    //     for (key, value) in &tree.node {
-    //         println!("({key:?}) -> {value:?}");
-    //     }
+        let mut values = tree
+            .completions::<_, String>("he".chars())
+            .into_iter()
+            .collect::<Vec<_>>();
 
-    //     let result = tree.get("test".chars());
-    //     // let result2 = tree.get("tesla", |f| f.chars().collect());
+        values.sort();
 
-    //     println!("Hello: {:?}", result);
-    //     // println!("Structure: {:?}", tree.node);
+        assert_eq!(values[0], "hello");
+        assert_eq!(values[1], "hey");
+    }
 
-    //     panic!("Ye");
-    // }
+    #[test]
+    pub fn test_arbitrary_deletion() {
+        let mut tree: Trie<char, String> = Trie::new();
+        arbtest::arbtest(|u| {
+            let key: String = u.arbitrary::<[char; 4]>().unwrap().iter().collect();
+            let value: String = u.arbitrary::<[char; 4]>().unwrap().iter().collect();
+
+            assert_eq!(
+                tree.contains_key(key.chars()),
+                tree.remove(key.chars()).is_some()
+            );
+
+            tree.insert(key.chars(), value);
+
+            assert_eq!(
+                tree.contains_key(key.chars()),
+                tree.remove(key.chars()).is_some()
+            );
+
+            Ok(())
+        });
+    }
 }

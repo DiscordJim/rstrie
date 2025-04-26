@@ -2,6 +2,17 @@
 name = "rstrie"
 version = "0.1.0"
 edition = "2024"
+authors = [ "Homer Riva-Cambrin" ]
+description = "A generalized Trie implementation for Rust."
+readme = "README.md"
+homepage = "https://github.com/DiscordJim/rstrie"
+license = "MIT License"
+keywords = [ "trie" ]
+categories = [ "data structure" ]
+
 
 [dependencies]
 slotmap = "1.0.7"
+
+[dev-dependencies]
+arbtest = "0.3.2"

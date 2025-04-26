@@ -1,40 +1,38 @@
-use std::{collections::HashMap, hash::BuildHasher};
+use std::{collections::HashMap, hash::BuildHasher, marker::PhantomData};
 use core::hash::Hash;
 
 use crate::NodeKey;
 
 #[derive(Debug, Default, Clone)]
-pub(crate) struct Node<K, V, S> {
+pub(crate) struct Node<K, V> {
     key: Option<K>,
-    sub_keys: HashMap<K, NodeKey, S>,
+    pub(crate) sub_keys: Vec<(K, NodeKey)>,
     value: Option<V>,
-    parent: Option<NodeKey>,
+    parent: Option<NodeKey>
 }
 
-impl<K, V, S> Node<K, V, S>
-where
-    S: BuildHasher + Default,
+impl<K, V> Node<K, V>
 {
     pub fn root() -> Self {
         Node {
             key: None,
-            sub_keys: HashMap::with_hasher(S::default()),
+            sub_keys: Vec::default(),
             value: None,
-            parent: None,
+            parent: None
         }
     }
     pub fn keyed(key: K, parent: NodeKey) -> Self {
         Self {
-            sub_keys: HashMap::with_hasher(S::default()),
+            sub_keys: Vec::default(),
             value: None,
             key: Some(key),
-            parent: Some(parent),
+            parent: Some(parent)
         }
     }
     
 }
 
-impl<K, V, S> Node<K, V, S> {
+impl<K, V> Node<K, V> {
     pub fn key(&self) -> &Option<K> {
         &self.key
     }
@@ -46,24 +44,48 @@ impl<K, V, S> Node<K, V, S> {
     }
     pub fn get(&self, key: &K) -> Option<&NodeKey>
     where 
-        K: Eq + Hash,
-        S: BuildHasher
+        K: Ord
     {
-        self.sub_keys.get(key)
+        let val = self.sub_keys.iter().find(|(k, _)| key == k);
+        Some(&val?.1)
     }
+  
     pub fn insert(&mut self, key: K, value: NodeKey) -> Option<NodeKey>
     where 
-        K: Eq + Hash,
-        S: BuildHasher
+        K: Ord
     {
-        self.sub_keys.insert(key, value)
+
+        match self.bin_search(&key) {
+            Ok(found) => {
+             
+                let (_ , old) = std::mem::replace(&mut self.sub_keys[found], (key, value));
+                Some(old)
+            }
+
+            Err(found) => {
+                self.sub_keys.insert(found, (key, value));
+
+                None
+            }
+        }
+
+        // let old = self.remove(&key);
+
+        // self.sub_keys.push((key, value));
+
+        // old
+    }
+    fn bin_search(&self, key: &K) -> Result<usize, usize>
+    where 
+        K: Ord
+    {
+        self.sub_keys.binary_search_by(|(k, _)| k.cmp(key))
     }
     pub fn remove(&mut self, key: &K) -> Option<NodeKey>
     where 
-        K: Eq + Hash,
-        S: BuildHasher
+        K: Ord
     {
-        self.sub_keys.remove(key)
+        Some(self.sub_keys.remove(self.bin_search(key).ok()?).1)
     } 
     pub fn sub_key_len(&self) -> usize {
         self.sub_keys.len()
@@ -77,4 +99,19 @@ impl<K, V, S> Node<K, V, S> {
     pub fn value_mut(&mut self) -> &mut Option<V> {
         &mut self.value
     }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use std::hash::RandomState;
+
+    use crate::Node;
+
+
+
+    // #[test]
+    // pub fn t() {
+    //     panic!("KEY: {}", size_of::<Node<u8, u8, RandomState>>());
+    // }
 }
