@@ -1,10 +1,10 @@
 use std::{
     collections::VecDeque,
     fmt::Debug,
-    hash::{BuildHasher, Hash, RandomState},
     iter::{Peekable, Zip},
     marker::PhantomData,
     ops::{Index, IndexMut},
+    ptr::NonNull,
     vec,
 };
 
@@ -14,9 +14,10 @@ use slotmap::{
     basic::{Values, ValuesMut},
 };
 
-mod alloc;
 mod iter;
 mod node;
+
+pub use crate::iter::StrIter;
 
 slotmap::new_key_type! { struct NodeKey; }
 
@@ -68,8 +69,7 @@ impl<K, V> Default for Trie<K, V> {
     }
 }
 
-impl<K, V> Trie<K, V>
-{
+impl<K, V> Trie<K, V> {
     /// Creates a new [Trie] with no keys and records. This will
     /// create a [Trie] with a capacity of zero using the [Trie::with_capacity] method.
     ///
@@ -79,8 +79,7 @@ impl<K, V> Trie<K, V>
     /// let mut tree = Trie::<char, &str>::new();
     /// assert_eq!(tree.len(), 0);
     /// ```
-    pub fn new() -> Self
-    {
+    pub fn new() -> Self {
         Self::with_capacity(0)
     }
     /// Creates a new [Trie] with a certain specified capacity.
@@ -91,8 +90,7 @@ impl<K, V> Trie<K, V>
     /// let mut tree = Trie::<char, usize>::with_capacity(20);
     /// assert!(tree.is_empty());
     /// ```
-    pub fn with_capacity(slots: usize) -> Self
-    {
+    pub fn with_capacity(slots: usize) -> Self {
         let mut node = SlotMap::with_capacity_and_key(slots);
         let root = node.insert(Node::root());
         Self {
@@ -106,10 +104,10 @@ impl<K, V> Trie<K, V>
     fn get_entrypoint<I>(&self, key: &mut I) -> (Option<&NodeKey>, Option<K>)
     where
         I: Iterator<Item = K>,
-        K: Ord
+        K: Ord,
     {
         match key.next() {
-            Some(first) => (self.node[self.root].get(&first), Some(first)),
+            Some(first) => (self.node[self.root].get(&first, &self.node), Some(first)),
             // We just return the root node.
             None => (Some(&self.root), None),
         }
@@ -152,7 +150,7 @@ impl<K, V> Trie<K, V>
                 trajectory_path.push(*end);
             }
 
-            let slot = self.node[*end].get(&current);
+            let slot = self.node[*end].get(&current, &self.node);
 
             if let Some(slot) = slot {
                 end = slot;
@@ -201,9 +199,9 @@ impl<K, V> Trie<K, V>
         current: usize,
         // The index of the current node.
         index: NodeKey,
-    )
-    {
-        for (key, link) in &self.node[index].sub_keys {
+    ) {
+        for link in &self.node[index].sub_keys {
+            let key = self.node[*link].key().as_ref().unwrap();
             let cur = Completion {
                 value: vec![key],
                 previous: Some(current),
@@ -556,6 +554,34 @@ impl<K, V> Trie<K, V>
     {
         self.node[self.lookup_key(key)?].value().as_ref()
     }
+    /// Tries to get the key map.
+    ///
+    /// # Errors
+    /// If the keys are not disjoint, i.e, if they map to the same value.
+    fn try_get_key_map<I, const N: usize>(
+        &mut self,
+        keys: [I; N],
+    ) -> Result<[Option<NodeKey>; N], NodeKey>
+    where
+        I: IntoIterator<Item = K>,
+        K: Ord,
+    {
+        let mut array = [None::<NodeKey>; N];
+
+        let mut i = 0;
+        for k in keys.into_iter() {
+            let candidate = self.lookup_key(k);
+
+            if candidate.is_some() && array.contains(&candidate) {
+                return Err(candidate.unwrap());
+            }
+            array[i] = candidate;
+
+            i += 1;
+        }
+
+        Ok(array)
+    }
     /// Attempts to get many mutable references to the array with a set of
     /// valid keys. All keys must be disjoint and valid or else the entire
     /// set will return None.
@@ -568,41 +594,92 @@ impl<K, V> Trie<K, V>
     /// tree.insert("hello".chars(), 3);
     /// tree.insert("world".chars(), 4);
     ///
-    /// let keys = tree.get_disjoint_mut([ "hello".chars(), "world".chars() ]).unwrap();
-    /// *keys[0] = 4;
-    /// *keys[1] = 2;
+    /// let mut keys = tree.get_disjoint_mut([ "hello".chars(), "world".chars() ]);
+    /// **keys[0].as_mut().unwrap() = 4;
+    /// **keys[1].as_mut().unwrap() = 2;
     ///
     /// assert_eq!(tree.get("hello".chars()), Some(&4));
     /// assert_eq!(tree.get("world".chars()), Some(&2));
     /// ```
-    pub fn get_disjoint_mut<'a, I, const N: usize>(
-        &'a mut self,
-        keys: [I; N],
-    ) -> Option<[&'a mut V; N]>
+    pub fn get_disjoint_mut<I, const N: usize>(&mut self, keys: [I; N]) -> [Option<&mut V>; N]
     where
         I: IntoIterator<Item = K>,
         K: Ord,
     {
-        // Perform key lookup.
-        let mut node_keys: [NodeKey; N] = [NodeKey::default(); N];
-        let mut i = 0;
-        for value in keys.into_iter() {
-            node_keys[i] = self.lookup_key(value)?;
-            i += 1;
+        self.try_get_disjoint_mut(keys)
+            .expect("Keys were overlapping.")
+    }
+
+    /// Using an array of node keys, fetch many mutable pointers.
+    fn get_many_mut_ptr<const N: usize>(
+        &mut self,
+        keys: [Option<NodeKey>; N],
+    ) -> [Option<NonNull<V>>; N] {
+        let mut many: [Option<NonNull<V>>; N] = core::array::from_fn(|_| None);
+
+        for i in 0..N {
+            match keys[i] {
+                Some(inner) => {
+                    let fetched = self
+                        .node
+                        .get_mut(inner)
+                        .unwrap()
+                        .value_mut()
+                        .as_mut()
+                        .unwrap() as *mut V;
+
+                    // SAFETY: Pointer is not null.
+                    many[i] = Some(unsafe { NonNull::new_unchecked(fetched) });
+                }
+                None => many[i] = None,
+            }
+        }
+        many
+    }
+    /// Attempts to get many mutable references to the array with a set of
+    /// valid keys. All keys must be disjoint and valid or else the entire
+    /// set will return None.
+    ///
+    /// ```
+    /// use rstrie::Trie;
+    ///
+    /// let mut tree = Trie::<char, usize>::new();
+    ///
+    /// tree.insert("hello".chars(), 3);
+    /// tree.insert("world".chars(), 4);
+    ///
+    /// let mut keys = tree.try_get_disjoint_mut([ "hello".chars(), "world".chars() ]).unwrap();
+    /// **keys[0].as_mut().unwrap() = 4;
+    /// **keys[1].as_mut().unwrap() = 2;
+    ///
+    /// assert_eq!(tree.get("hello".chars()), Some(&4));
+    /// assert_eq!(tree.get("world".chars()), Some(&2));
+    /// ```
+    pub fn try_get_disjoint_mut<I, const N: usize>(
+        &mut self,
+        keys: [I; N],
+    ) -> Result<[Option<&mut V>; N], ()>
+    where
+        I: IntoIterator<Item = K>,
+        K: Ord,
+    {
+        // Calculate the key map.
+        let array = self.try_get_key_map(keys).map_err(|_| ())?;
+
+        // Get the pointer map.
+        let mut ptr_map: [Option<NonNull<V>>; N] = self.get_many_mut_ptr(array);
+
+        // Create proper references from these.
+        let mut resulting = core::array::from_fn(|_| None);
+        for i in 0..N {
+            // SAFETY: The pointer is not null and all values are disjoint by
+            // the invariants of the the [Trie::try_get_key_map] call.
+            resulting[i] = ptr_map[i].take().map(|mut i| unsafe { i.as_mut() });
         }
 
-        // Acquire the selection of disjoint keys.
-        let result = self.node.get_disjoint_mut(node_keys)?;
-
-        Some(
-            result
-                .into_iter()
-                .map(|f| f.value_mut().as_mut().unwrap())
-                .collect::<Vec<_>>()
-                .try_into()
-                .ok()?,
-        )
+        Ok(resulting)
     }
+
     /// Gets a mutable reference of a value from the [Trie] according to
     /// the key. The key is an iterable that can be used
     /// to access the record.
@@ -668,8 +745,7 @@ impl<K, V> Trie<K, V>
     /// tree.clear();
     /// assert!(tree.is_empty());
     /// ```
-    pub fn clear(&mut self)
-    {
+    pub fn clear(&mut self) {
         self.node.clear();
         self.root = self.node.insert(Node::root());
         self.size = 0;
@@ -695,7 +771,7 @@ impl<K, V> Trie<K, V>
     pub fn remove<I>(&mut self, master: I) -> Option<V>
     where
         I: IntoIterator<Item = K>,
-        K: Ord + Copy,
+        K: Ord + Debug,
     {
         let trajectory = self
             .internal_walk(master.into_iter().peekable().by_ref(), true)
@@ -705,11 +781,10 @@ impl<K, V> Trie<K, V>
         let mut value = None;
 
         let mut previous = None;
-        let mut previous_key = None;
         for iter in trajectory.path.iter().rev() {
-            let k_temp = self.node[*iter].key().clone();
 
             if previous.is_some() {
+                println!("REMOVING: {:?}", previous);
                 self.node.remove(previous.unwrap());
             }
 
@@ -720,12 +795,14 @@ impl<K, V> Trie<K, V>
             } else if self.node[*iter].sub_key_len() == 1 && !self.node[*iter].is_root() {
                 self.node.remove(*iter);
             } else {
-                self.node[*iter].remove(&previous_key.unwrap());
+                // self.node[*iter].remove(&previous_key.unwrap());
+                println!("Current: {:?}", iter);
+                remove_node_subkey_by_key(*iter, *previous.as_ref().unwrap(), &mut self.node);
+                // remove_node_subkey(*iter, previous_key.as_ref().unwrap(), &mut self.node);
                 break; // we are back in a consistent state.
             }
 
             previous = Some(*iter);
-            previous_key = k_temp;
         }
 
         if value.is_some() {
@@ -789,7 +866,7 @@ impl<K, V> Trie<K, V>
     pub fn insert<I>(&mut self, master: I, value: V) -> Option<V>
     where
         I: IntoIterator<Item = K>,
-        K: Clone + Ord
+        K: Ord,
     {
         let master = master.into_iter();
 
@@ -811,17 +888,20 @@ impl<K, V> Trie<K, V>
                     value
                 } else {
                     // Make a new node.
-                    let new_node = Node::keyed(first.clone().unwrap(), self.root);
+                    let new_node = Node::keyed(first.unwrap(), self.root);
 
+                    
                     let new_key = self.node.insert(new_node);
-                    self.node[self.root].insert(first.clone().unwrap(), new_key);
+                    insert_node_subkey(self.root, new_key, &mut self.node);
+                    // self.node[self.root].insert(first.as_ref().unwrap(), new_key, &self.node);
                     new_key
                 };
 
                 let mut nk = None;
                 for item in remainder {
-                    nk = Some(self.node.insert(Node::keyed(item.clone(), previous)));
-                    self.node[previous].insert(item, nk.unwrap());
+                    nk = Some(self.node.insert(Node::keyed(item, previous)));
+                    insert_node_subkey(previous,nk.unwrap(), &mut self.node);
+                    // self.node[previous].insert(&item, nk.unwrap(), &self.node);
 
                     previous = nk.unwrap();
                 }
@@ -836,7 +916,6 @@ impl<K, V> Trie<K, V>
         // }
     }
 }
-
 
 #[derive(Debug)]
 pub struct CompletionIter<'a, K, J> {
@@ -858,6 +937,39 @@ struct Completion<'a, K> {
     previous: Option<usize>,
 }
 
+
+fn insert_node_subkey<K: Ord, V>(
+    source: NodeKey,
+    value: NodeKey,
+    buffer: &mut SlotMap<NodeKey, Node<K, V>>,
+) -> Option<NodeKey> {
+    match buffer[source].bin_search(value, buffer) {
+        Ok(valid) => {
+            let old = std::mem::replace(&mut buffer[source].sub_keys[valid], value);
+            Some(old)
+        }
+        Err(invalid) => {
+            buffer[source].sub_keys.insert(invalid, value);
+            None
+        }
+    }
+
+    // None
+}
+
+fn remove_node_subkey_by_key<K: Ord, V>(
+    source: NodeKey,
+    to_remove: NodeKey,
+    buffer: &mut SlotMap<NodeKey, Node<K, V>>,
+) -> Option<NodeKey> {
+    let result = buffer[source].sub_keys.iter().position(|s| *s == to_remove)?;
+
+    let elem = buffer[source].sub_keys.remove(result);
+
+    Some(elem)
+}
+
+
 impl<'a, K: Debug, J> Iterator for CompletionIter<'a, K, J>
 where
     J: FromIterator<&'a K>,
@@ -865,7 +977,7 @@ where
     type Item = J;
 
     /// Gets the next completion. This is comptued lazily.
-    /// 
+    ///
     /// ```
     /// use rstrie::Trie;
     ///
@@ -1161,7 +1273,7 @@ impl<'a, K, V> Iterator for ValueIterRef<'a, K, V> {
 
 impl<KP, K, V> Extend<(KP, V)> for Trie<K, V>
 where
-    K: Ord + Clone,
+    K: Ord,
     KP: IntoIterator<Item = K>,
 {
     /// Extends a [Trie] from an iterator of tuples. The tuples must contain
@@ -1189,7 +1301,7 @@ where
 
 impl<KP, K, V> FromIterator<(KP, V)> for Trie<K, V>
 where
-    K: Ord + Clone,
+    K: Ord,
     KP: IntoIterator<Item = K>,
 {
     /// Creates a [Trie] from an iterator of tuples. The tuples must contain
@@ -1215,7 +1327,7 @@ where
 
 impl<KP, K, V, const N: usize> From<[(KP, V); N]> for Trie<K, V>
 where
-    K: Ord + Clone,
+    K: Ord,
     KP: IntoIterator<Item = K>,
 {
     /// Creates a [Trie] from an array of tuples. The tuples must contain
@@ -1240,14 +1352,28 @@ where
 #[cfg(test)]
 mod tests {
 
-    use std::hash::RandomState;
-
     use super::Trie;
 
     #[test]
     pub fn trie_from_tuples() {
         let trie: Trie<char, i32> = Trie::from([("hello".chars(), 4)]);
         assert_eq!(trie.get("hello".chars()), Some(&4));
+    }
+
+    #[test]
+    pub fn trie_disjoint_mut() {
+        let mut tree = Trie::<char, usize>::new();
+
+        tree.insert("hello".chars(), 3);
+        tree.insert("world".chars(), 4);
+
+        let mut keys = tree.get_disjoint_mut(["hello".chars(), "world".chars()]);
+
+        **keys[0].as_mut().unwrap() = 4;
+        **keys[1].as_mut().unwrap() = 2;
+
+        assert_eq!(tree.get("hello".chars()), Some(&4));
+        assert_eq!(tree.get("world".chars()), Some(&2));
     }
 
     #[test]
@@ -1302,7 +1428,10 @@ mod tests {
 
         assert!(tree.contains_key("test".chars()));
 
+        println!("Helo");
+
         tree.remove("test".chars());
+        println!("Deleetign");
         assert!(!tree.contains_key("test".chars()));
         assert_eq!(tree.len(), 0);
     }
