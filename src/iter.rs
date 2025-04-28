@@ -28,12 +28,3 @@ impl<V> Iterator for Iter<V> {
 }
 
 
-pub struct StrIter<'a>(pub &'a str);
-
-impl<'a> IntoIterator for StrIter<'a> {
-    type IntoIter = Chars<'a>;
-    type Item = char;
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.chars()
-    }
-}

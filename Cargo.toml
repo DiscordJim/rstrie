@@ -12,8 +12,6 @@ categories = [ "data structure" ]
 
 
 [dependencies]
-array-init = "2.1.0"
-slotmap = "1.0.7"
 
 [dev-dependencies]
 arbtest = "0.3.2"

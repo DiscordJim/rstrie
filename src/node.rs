@@ -1,7 +1,4 @@
-
 use std::fmt::Debug;
-
-use slotmap::SlotMap;
 
 use crate::{NodeIndex, Slots};
 
@@ -10,20 +7,16 @@ pub(crate) struct Node<K, V> {
     key: Option<K>,
     pub(crate) sub_keys: Vec<NodeIndex>,
     value: Option<V>,
-    pub(crate) parent: Option<NodeIndex>
+    pub(crate) parent: Option<NodeIndex>,
 }
 
-
-
-
-impl<K, V> Node<K, V>
-{
-    pub fn root() -> Self {
+impl<K, V> Node<K, V> {
+    pub const fn root() -> Self {
         Node {
             key: None,
-            sub_keys: Vec::default(),
+            sub_keys: Vec::new(),
             value: None,
-            parent: None
+            parent: None,
         }
     }
     pub fn keyed(key: K, parent: NodeIndex) -> Self {
@@ -31,10 +24,9 @@ impl<K, V> Node<K, V>
             sub_keys: Vec::default(),
             value: None,
             key: Some(key),
-            parent: Some(parent)
+            parent: Some(parent),
         }
     }
-    
 }
 
 impl<K, V> Node<K, V> {
@@ -48,21 +40,22 @@ impl<K, V> Node<K, V> {
         self.parent.clone()
     }
     pub fn get(&self, key: &K, buffer: &Slots<K, V>) -> Option<&NodeIndex>
-    where 
-        K: Ord
+    where
+        K: Ord,
     {
-        let val = self.sub_keys.iter().find(|k| key == buffer[**k].key().as_ref().unwrap());
-        Some(val?)
+        self.sub_keys
+            .iter()
+            .find(|k| key == buffer[**k].key().as_ref().unwrap())
     }
-  
+
     // pub fn insert(&mut self, key: K, value: NodeIndex) -> Option<NodeIndex>
-    // where 
+    // where
     //     K: Ord
     // {
 
     //     match self.bin_search(&key) {
     //         Ok(found) => {
-             
+
     //             let (_ , old) = std::mem::replace(&mut self.sub_keys[found], (key, value));
     //             Some(old)
     //         }
@@ -81,20 +74,19 @@ impl<K, V> Node<K, V> {
     //     // old
     // }
     pub fn bin_search(&self, reference: NodeIndex, buffer: &Slots<K, V>) -> Result<usize, usize>
-    where 
+    where
         K: Ord,
     {
         let key = buffer[reference].key().as_ref().unwrap();
-        self.sub_keys.binary_search_by(|node| {
-            buffer[*node].key.as_ref().unwrap().cmp(key)
-        })
+        self.sub_keys
+            .binary_search_by(|node| buffer[*node].key.as_ref().unwrap().cmp(key))
     }
     // pub fn remove(&mut self, key: &K) -> Option<NodeIndex>
-    // where 
+    // where
     //     K: Ord
     // {
     //     Some(self.sub_keys.remove(self.bin_search(key).ok()?).1)
-    // } 
+    // }
     pub fn sub_key_len(&self) -> usize {
         self.sub_keys.len()
     }
@@ -108,6 +100,3 @@ impl<K, V> Node<K, V> {
         &mut self.value
     }
 }
-
-
-

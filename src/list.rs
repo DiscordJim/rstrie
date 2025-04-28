@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Debug, iter::{Enumerate, Filter, Map}, ops::{Index, IndexMut, RangeBounds}, slice};
+use std::{collections::HashMap, ops::{Index, IndexMut}};
 
 use crate::Node;
 
@@ -11,13 +11,10 @@ pub(crate) struct Slots<K, V> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct NodeIndex {
-    position: usize
+    pub(crate) position: usize
 }
 
 impl<K, V> Slots<K, V> {
-    pub fn new() -> Self {
-        Self::with_capacity(0)
-    }
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             slots: Vec::with_capacity(cap),
@@ -52,16 +49,6 @@ impl<K, V> Slots<K, V> {
             .filter(|(_, f)| f.is_some())
             .map(|(i, key)| (NodeIndex { position: i }, key.as_ref().unwrap()))
     }
-    pub fn values(&self) -> impl Iterator<Item = &Option<V>> {
-        self.slots.iter()
-            .filter(|f| f.is_some())
-            .map(|f| f.as_ref().unwrap().value())
-    }
-    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut Option<V>> {
-        self.slots.iter_mut()
-            .filter(|f| f.is_some())
-            .map(|f| f.as_mut().unwrap().value_mut())
-    }
     pub fn drain(&mut self) -> impl Iterator<Item = Node<K, V>> {
         self.slots.drain(0..self.slots.len())
             // .enumerate()
@@ -82,8 +69,6 @@ impl<K, V> Slots<K, V> {
     /// Defragments the map, please note that this will correct all INTERNAL node indices but
     /// any existing (living) ones will become invalidated. 
     pub fn defragment(&mut self)
-    where 
-        Node<K, V>: Debug
     {
         // Create a [HashMap] to keep track of the old positions so we can map
         // them to the new positions.
@@ -111,14 +96,14 @@ impl<K, V> Slots<K, V> {
         // Remap all the keys.
         for node in self.slots.iter_mut().filter(|f| f.is_some()).map(|f| f.as_mut().unwrap()) {
             if let Some(par) = &mut node.parent {
-                if remapper.contains_key(&par) {
-                    *par = *remapper.get(&par).unwrap();
+                if remapper.contains_key(par) {
+                    *par = *remapper.get(par).unwrap();
                 }
             }  
             
             for key in &mut node.sub_keys {
                 if remapper.contains_key(key) {
-                    *key = *remapper.get(&key).unwrap();
+                    *key = *remapper.get(key).unwrap();
                 }
             }
 
@@ -131,6 +116,7 @@ impl<K, V> Slots<K, V> {
     pub fn node_iter_mut(&mut self) -> NodeIterMut<'_, K, V> {
         NodeIterMut { inner: self.slots.iter_mut(), position: 0 }
     }
+    
 }
 
 impl<K, V> Index<NodeIndex> for Slots<K, V> {
@@ -188,7 +174,7 @@ mod tests {
 
     #[test]
     pub fn basic_nodelist() {
-        let mut list = Slots::<char, String>::new();
+        let mut list = Slots::<char, String>::with_capacity(0);
         let key = list.insert(Node::root());
         assert_eq!(list.free_list.len(), 0);
         assert_eq!(list.slots.len(), 1);
@@ -249,7 +235,7 @@ mod tests {
     #[test]
     pub fn test_remap_shrink() {
 
-        let mut list = Slots::<char, String>::new();
+        let mut list = Slots::<char, String>::with_capacity(0);
         let key = list.insert(Node::root());
         let bruha = list.insert(Node::keyed('a', key));
         let bruh = list.insert(Node::keyed('b', key));
