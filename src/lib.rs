@@ -44,11 +44,12 @@ pub struct Trie<K, V> {
 /// ```
 /// For instance when "tea" was inserted, we would have a *common* path
 /// up until 'e' and then it would diverge.
-struct WalkFailure<'a, I, K> {
+struct WalkFailure<'a, I> {
     /// The root of the walk.
-    root: Option<NodeIndex>,
+    root: NodeIndex,
     /// The first node in the walk.
-    first: Option<K>,
+    // first: Option<K>,
+    // first: K,
     /// The remainder of the path as an iterator.
     remainder: &'a mut I,
 }
@@ -135,7 +136,7 @@ impl<K, V> Trie<K, V> {
     fn internal_walk_with_index<'a, I>(
         &self,
         remainder: &'a mut Peekable<I>,
-    ) -> Result<NodeIndex, WalkFailure<'a, Peekable<I>, K>>
+    ) -> Result<NodeIndex, WalkFailure<'a, Peekable<I>>>
     where
         I: Iterator<Item = K>,
         K: Ord,
@@ -149,7 +150,7 @@ impl<K, V> Trie<K, V> {
     fn internal_walk_with_path<'a, I>(
         &self,
         remainder: &'a mut Peekable<I>,
-    ) -> Result<WalkTrajectory, WalkFailure<'a, Peekable<I>, K>>
+    ) -> Result<WalkTrajectory, WalkFailure<'a, Peekable<I>>>
     where
         I: Iterator<Item = K>,
         K: Ord,
@@ -164,7 +165,7 @@ impl<K, V> Trie<K, V> {
         &self,
         remainder: &'a mut Peekable<I>,
         mut functor: F
-    ) -> Result<WalkTrajectory, WalkFailure<'a, Peekable<I>, K>>
+    ) -> Result<WalkTrajectory, WalkFailure<'a, Peekable<I>>>
     where
         I: Iterator<Item = K>,
         K: Ord,
@@ -193,7 +194,7 @@ impl<K, V> Trie<K, V> {
     fn internal_walk_collect_key<'a, I, J>(
         &self,
         remainder: &'a mut Peekable<I>,
-    ) -> Result<(J, NodeIndex), WalkFailure<'a, Peekable<I>, K>>
+    ) -> Result<(J, NodeIndex), WalkFailure<'a, Peekable<I>>>
     where
         I: Iterator<Item = K>,
         K: Ord,
@@ -206,51 +207,64 @@ impl<K, V> Trie<K, V> {
         Ok((collector.into_iter().collect::<J>(), index))
     }
 
-    
+    /// Performs an internal walk of the [Trie]. This is the most important function
+    /// for the operation of the [Trie]. It takes in a visitor function that is called
+    /// every time a nodes key is accessed, this allows for activities such as collecting
+    /// the key.
+    /// 
+    /// If the walk is fully succesful, as in we can propery traverse the path to the end, we
+    /// return the [NodeIndex] of the last node.
+    /// 
+    /// If the walk cannot be completed, we return a [WalkFailure] struct that contains the necessary
+    /// information to perform insertion.
     fn internal_walk_with_fn<'a, I, F>(
         &self,
         remainder: &'a mut Peekable<I>,
-        mut functor: F,
-    ) -> Result<NodeIndex, WalkFailure<'a, Peekable<I>, K>>
+        mut visitor_fn: F,
+    ) -> Result<NodeIndex, WalkFailure<'a, Peekable<I>>>
     where
         I: Iterator<Item = K>,
         K: Ord,
         F: FnMut(NodeIndex),
     {
         // The root for the path.
-        functor(self.root);
+        visitor_fn(self.root);
 
         
-        let (left, first) = match remainder.next() {
-            Some(first) => (self.node[self.root].get(&first, &self.node), Some(first)),
-            // We just return the root node.
-            None => (Some(&self.root), None),
-        };
+        // let (left, first) = match remainder.next() {
+        //     Some(first) => (self.node[self.root].get(&first, &self.node), Some(first)),
+        //     // We just return the root node.
+        //     None => (Some(&self.root), None),
+        // };
          
 
-        // let (left, first) = self.get_entrypoint(remainder);
-        if left.is_none() {
-            return Err(WalkFailure {
-                root: None,
-                first,
-                remainder,
-            });
-        }
+        // // let (left, first) = self.get_entrypoint(remainder);
+        // if left.is_none() {
+        //     return Err(WalkFailure {
+        //         root: None,
+        //         first,
+        //         remainder,
+        //     });
+        // }
 
-        let mut end = left.unwrap();
+        println!("Starting walk...");
+
+        let mut end = &self.root;
         loop {
             let Some(current) = remainder.peek() else {
                 break;
             };
 
-            functor(*end);
+            // println!("Progrssing: {:?} {:?}", end, self.node[*end].get(&current, &self.node));
+
+         
+            visitor_fn(*end);
 
             if let Some(slot) = self.node[*end].get(&current, &self.node) {
                 end = slot;
             } else {
                 return Err(WalkFailure {
-                    root: Some(*end),
-                    first,
+                    root: *end,
                     remainder,
                 });
             }
@@ -259,7 +273,7 @@ impl<K, V> Trie<K, V> {
             remainder.next();
         }
 
-        functor(*end);
+        visitor_fn(*end);
 
         Ok(*end)
     }
@@ -1126,41 +1140,23 @@ impl<K, V> Trie<K, V> {
     {
         self.make_trie_consistent();
 
-        let master = master.into_iter();
-
         self.size += 1;
 
-        match self.internal_walk_with_index(master.peekable().by_ref()) {
+        match self.internal_walk_with_index(master.into_iter().peekable().by_ref()) {
             Ok(v) => {
                 let current = self.node[v].value_mut().take();
                 *self.node[v].value_mut() = Some(value);
                 current
             }
             Err(WalkFailure {
-                root,
+                mut root,
                 remainder,
-                first,
             }) => {
-                let mut previous = if let Some(value) = root {
-                    // Node exists
-                    value
-                } else {
-                    // Make a new node.
-                    let new_node = Node::keyed(first.unwrap(), self.root);
-
-                    let new_key = self.node.insert(new_node);
-                    insert_node_subkey(self.root, new_key, &mut self.node);
-                    // self.node[self.root].insert(first.as_ref().unwrap(), new_key, &self.node);
-                    new_key
-                };
-
-                let mut nk = Some(previous);
+                let mut nk = Some(root);
                 for item in remainder {
-                    nk = Some(self.node.insert(Node::keyed(item, previous)));
-                    insert_node_subkey(previous, nk.unwrap(), &mut self.node);
-                    // self.node[previous].insert(&item, nk.unwrap(), &self.node);
-
-                    previous = nk.unwrap();
+                    nk = Some(self.node.insert(Node::keyed(item, root)));
+                    insert_node_subkey(root, nk.unwrap(), &mut self.node);
+                    root = nk.unwrap();
                 }
 
                 *self.node[nk.unwrap()].value_mut() = Some(value);
@@ -1856,6 +1852,29 @@ mod tests {
         assert_eq!(values.next(), Some(1));
         assert_eq!(values.next(), Some(2));
         assert_eq!(values.next(), None);
+    }
+
+    #[test]
+    pub fn path_traversal_test() {
+        let mut tree = Trie::<char, &str>::new();
+        tree.insert(['t', 'e', 's', 't'], "sample_1");
+
+        println!("TREE: {:?}", tree);
+
+        let mut tracker = vec![];
+        
+        println!("Traversal: {:?}", tree.internal_walk_with_fn(['t', 'e', 'a'].into_iter().peekable().by_ref(), |nk| {
+
+            println!("Progressing @ {nk:?} {:?}", tree.node[nk]);
+            println!("Value @ {nk:?} {:?}", tree.node[nk].get(&'t', &tree.node));
+            tree.key_collect(nk, &mut tracker);
+        }));
+
+
+        
+        
+
+        // panic!("Hello {:?}", tracker);
     }
 
     #[test]
