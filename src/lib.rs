@@ -154,10 +154,27 @@ impl<K, V> Trie<K, V> {
         I: Iterator<Item = K>,
         K: Ord,
     {
+        self.internal_walk_with_path_fn(remainder, |_| {})
+    }
+
+    /// Performs an internal walk of the [Trie] and obtains the path
+    /// used to get there. Internally, this just calls the internal walk
+    /// function and has it collect the nodes as we go.
+    fn internal_walk_with_path_fn<'a, I, F>(
+        &self,
+        remainder: &'a mut Peekable<I>,
+        mut functor: F
+    ) -> Result<WalkTrajectory, WalkFailure<'a, Peekable<I>, K>>
+    where
+        I: Iterator<Item = K>,
+        K: Ord,
+        F: FnMut(NodeIndex)
+    {
         let mut trajectory_path = vec![];
 
         let end = self.internal_walk_with_fn(remainder, |node| {
             trajectory_path.push(node);
+            functor(node);
         })?;
 
         Ok(WalkTrajectory {
@@ -165,6 +182,31 @@ impl<K, V> Trie<K, V> {
             end,
         })
     }
+
+    /// Collects the key
+    fn key_collect<'a>(&'a self, node: NodeIndex, array: &mut Vec<&'a K>)  {
+        if let Some(inner) = self.node[node].key() {
+            array.push(inner);
+        }
+    }
+
+    fn internal_walk_collect_key<'a, I, J>(
+        &self,
+        remainder: &'a mut Peekable<I>,
+    ) -> Result<(J, NodeIndex), WalkFailure<'a, Peekable<I>, K>>
+    where
+        I: Iterator<Item = K>,
+        K: Ord,
+        for<'b> J: FromIterator<&'b K>,
+    {
+        let mut collector = vec![];
+        let index = self.internal_walk_with_fn(remainder, |nk| {
+            self.key_collect(nk, &mut collector);
+        })?;
+        Ok((collector.into_iter().collect::<J>(), index))
+    }
+
+    
     fn internal_walk_with_fn<'a, I, F>(
         &self,
         remainder: &'a mut Peekable<I>,
@@ -178,7 +220,15 @@ impl<K, V> Trie<K, V> {
         // The root for the path.
         functor(self.root);
 
-        let (left, first) = self.get_entrypoint(remainder);
+        
+        let (left, first) = match remainder.next() {
+            Some(first) => (self.node[self.root].get(&first, &self.node), Some(first)),
+            // We just return the root node.
+            None => (Some(&self.root), None),
+        };
+         
+
+        // let (left, first) = self.get_entrypoint(remainder);
         if left.is_none() {
             return Err(WalkFailure {
                 root: None,
@@ -195,7 +245,7 @@ impl<K, V> Trie<K, V> {
 
             functor(*end);
 
-            if let Some(slot) = self.node[*end].get(current, &self.node) {
+            if let Some(slot) = self.node[*end].get(&current, &self.node) {
                 end = slot;
             } else {
                 return Err(WalkFailure {
@@ -850,10 +900,11 @@ impl<K, V> Trie<K, V> {
         for<'a> J: FromIterator<&'a K>,
         K: Ord,
     {
-        let nk = self.lookup_key(key)?;
-        let get = self.node[nk].value().as_ref()?;
-
-        Some((self.reconstruct_node_key(nk)?, get))
+        self.skip_trie_consistency()?;
+        let (key, value) = self
+            .internal_walk_collect_key(&mut key.into_iter().peekable())
+            .ok()?;
+        Some((key, self.node[value].value().as_ref().unwrap()))
     }
 
     /// Returns the key-value pair corresponding to the supplied key.
@@ -879,12 +930,14 @@ impl<K, V> Trie<K, V> {
         for<'a> J: FromIterator<&'a K>,
         K: Ord,
     {
-        let nk = self.lookup_key(key)?;
-        let node_key = self.reconstruct_node_key::<J>(nk)?;
-        let get = self.node[nk].value_mut().as_mut()?;
-
-        Some((node_key, get))
+        self.skip_trie_consistency()?;
+        let (key, value) = self
+            .internal_walk_collect_key(&mut key.into_iter().peekable())
+            .ok()?;
+        Some((key, self.node[value].value_mut().as_mut().unwrap()))
     }
+
+    
 
     /// Removes a key from the [Trie], returning the computed key and value
     /// if the key was previously in the map.
@@ -907,14 +960,17 @@ impl<K, V> Trie<K, V> {
         K: Ord,
     {
         self.skip_trie_consistency()?;
+
+        
+        let mut path = vec![];
         let trajectory = self
-            .internal_walk_with_path(key.into_iter().peekable().by_ref())
+            .internal_walk_with_path_fn(key.into_iter().peekable().by_ref(), |nk| self.key_collect(nk, &mut path))
             .ok()?;
 
         let mut traj_path = trajectory.path.iter().rev().peekable();
 
         if let Some(inner) = traj_path.peek() {
-            let reconstruction = self.reconstruct_node_key(**inner)?;
+            let reconstruction = path.into_iter().collect::<J>();
             let value = self.remove_post_walk(trajectory.path.iter().rev())?;
             Some((reconstruction, value))
         } else {
@@ -980,10 +1036,7 @@ impl<K, V> Trie<K, V> {
             } else if self.node[*iter].sub_key_len() == 1 && !self.node[*iter].is_root() {
                 self.node.remove(*iter);
             } else {
-                // self.node[*iter].remove(&previous_key.unwrap());
-                println!("Current: {:?}", iter);
                 remove_node_subkey_by_key(*iter, *previous.as_ref().unwrap(), &mut self.node);
-                // remove_node_subkey(*iter, previous_key.as_ref().unwrap(), &mut self.node);
                 break; // we are back in a consistent state.
             }
 
@@ -1143,6 +1196,32 @@ impl<K, V> Trie<K, V> {
         self.node.shrink_to_fit();
     }
 }
+
+// pub struct LazyKey<'a, K, J, V>
+// where
+//     for<'b> J: FromIterator<&'b K>
+// {
+//     inner: LazyKeyInner<'a, K, J, V>
+// }
+
+// enum LazyKeyInner<'a, K, J, V> {
+//     Resolved(J),
+//     Plan {
+//         sequence: Vec<NodeIndex>,
+//         map: &'a Trie<K, V>
+//     }
+// }
+
+// impl<'a, K, J, V> LazyKeyInner<'a, K, J, V> {
+//     pub fn key(self) -> LazyKeyInner<'a, K, J, V> {
+//         match self {
+//             LazyKeyInner::Resolved(inner) => Self::Resolved(inner),
+//             LazyKeyInner::Plan { sequence, map } => {
+//                 LazyKeyInner::Resolved(map.no)
+//             }
+//         }
+//     }
+// }
 
 #[derive(Debug)]
 pub struct CompletionIter<'a, K, J> {
@@ -1702,6 +1781,16 @@ impl<K, V, J> Iterator for Drain<'_, K, V, J> {
 mod tests {
 
     use super::Trie;
+
+    #[test]
+    pub fn trie_get_kv_properly() {
+        let mut trie: Trie<char, i32> = Trie::from([(['h', 'e', 'l', 'l', 'o'], 4)]);
+
+        assert_eq!(
+            trie.get_key_value::<_, String>("hello".chars()),
+            Some(("hello".to_string(), &4))
+        );
+    }
 
     #[test]
     pub fn trie_from_tuples() {
