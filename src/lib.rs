@@ -76,6 +76,182 @@ impl<K, V> Default for Trie<K, V> {
     }
 }
 
+struct WalkIter<'a, K, V> {
+    trie: &'a Trie<K, V>,
+    pending: Vec<Vec<NodeIndex>>
+}
+
+impl<'a, K: Debug + Ord, V> Iterator for WalkIter<'a, K, V> {
+    type Item = (NodeIndex, Vec<NodeIndex>);
+    fn next(&mut self) -> Option<Self::Item> {
+
+        while let Some(pending) = self.pending.pop() {
+            let current = pending.last().unwrap();
+            if self.trie.node[*current].value().is_some() {
+                // We have reached a root.
+                return Some((*current, pending));
+            }
+
+            for &child in self.trie.node[*current].sub_keys.iter().rev() {
+                // Create a new path.
+                let mut new_path = pending.clone();
+                new_path.push(child);
+                self.pending.push(new_path);
+            }
+        }
+
+        None
+    }   
+}
+
+// The following are the internal 'developer' functions of the [Trie].
+impl<K, V> Trie<K, V> {
+    /// Performs an internal wlak of the [Trie] but
+    /// receives the last node.
+    fn internal_walk_with_index<'a, I>(
+        &self,
+        remainder: &'a mut Peekable<I>,
+    ) -> Result<NodeIndex, WalkFailure<'a, Peekable<I>>>
+    where
+        I: Iterator<Item = K>,
+        K: Ord,
+    {
+        self.internal_walk_with_fn(remainder, |_| {})
+    }
+
+    /// Performs an internal walk of the [Trie] and obtains the path
+    /// used to get there. Internally, this just calls the internal walk
+    /// function and has it collect the nodes as we go.
+    fn internal_walk_with_path<'a, I>(
+        &self,
+        remainder: &'a mut Peekable<I>,
+    ) -> Result<WalkTrajectory, WalkFailure<'a, Peekable<I>>>
+    where
+        I: Iterator<Item = K>,
+        K: Ord,
+    {
+        self.internal_walk_with_path_fn(remainder, |_| {})
+    }
+
+    /// Performs an internal walk of the [Trie] and obtains the path
+    /// used to get there. Internally, this just calls the internal walk
+    /// function and has it collect the nodes as we go.
+    fn internal_walk_with_path_fn<'a, I, F>(
+        &self,
+        remainder: &'a mut Peekable<I>,
+        mut functor: F,
+    ) -> Result<WalkTrajectory, WalkFailure<'a, Peekable<I>>>
+    where
+        I: Iterator<Item = K>,
+        K: Ord,
+        F: FnMut(NodeIndex),
+    {
+        let mut trajectory_path = vec![];
+
+        let end = self.internal_walk_with_fn(remainder, |node| {
+            trajectory_path.push(node);
+            functor(node);
+        })?;
+
+        Ok(WalkTrajectory {
+            path: trajectory_path,
+            end,
+        })
+    }
+
+    /// Collects the key
+    fn key_collect<'a>(&'a self, node: NodeIndex, array: &mut Vec<&'a K>) {
+        if let Some(inner) = self.node[node].key() {
+            array.push(inner);
+        }
+    }
+
+    fn internal_walk_collect_key<'a, I, J>(
+        &self,
+        remainder: &'a mut Peekable<I>,
+    ) -> Result<(J, NodeIndex), WalkFailure<'a, Peekable<I>>>
+    where
+        I: Iterator<Item = K>,
+        K: Ord,
+        for<'b> J: FromIterator<&'b K>,
+    {
+        let mut collector = vec![];
+        let index =
+            self.internal_walk_with_fn(remainder, |nk| self.key_collect(nk, &mut collector))?;
+        Ok((collector.into_iter().collect::<J>(), index))
+    }
+
+    fn complete_walk(&self) -> WalkIter<'_, K, V> {
+        // self.walk_path(self.root);
+        WalkIter { trie: self, pending: vec![ vec![ self.root ] ]  }
+    }
+
+    fn walk_path(&self, current: NodeIndex) {
+        
+        println!("Walking from {current:?}");
+        if self.node[current].value().is_some() {
+            println!("TERMINAL");
+        }
+        for key in &self.node[current].sub_keys {
+            println!("({current:?}) --> ({key:?})");
+            self.walk_path(*key);
+        }
+
+    }
+
+    /// Performs an internal walk of the [Trie]. This is the most important function
+    /// for the operation of the [Trie]. It takes in a visitor function that is called
+    /// every time a nodes key is accessed, this allows for activities such as collecting
+    /// the key.
+    ///
+    /// If the walk is fully succesful, as in we can propery traverse the path to the end, we
+    /// return the [NodeIndex] of the last node.
+    ///
+    /// If the walk cannot be completed, we return a [WalkFailure] struct that contains the necessary
+    /// information to perform insertion.
+    fn internal_walk_with_fn<'a, I, F>(
+        &self,
+        remainder: &'a mut Peekable<I>,
+        mut visitor_fn: F,
+    ) -> Result<NodeIndex, WalkFailure<'a, Peekable<I>>>
+    where
+        I: Iterator<Item = K>,
+        K: Ord,
+        F: FnMut(NodeIndex),
+    {
+        // The root for the path.
+        visitor_fn(self.root);
+
+        let mut end = &self.root;
+        loop {
+            let Some(current) = remainder.peek() else {
+                break;
+            };
+
+            // Call on the current node.
+            visitor_fn(*end);
+
+            if let Some(slot) = self.node[*end].get(&current, &self.node) {
+                end = slot;
+            } else {
+                return Err(WalkFailure {
+                    root: *end,
+                    remainder,
+                });
+            }
+
+            // Actually consume.
+            remainder.next();
+        }
+
+        // Call on the very last index, if we reach this point this is indicatvie
+        // of a succesful complete walk.
+        visitor_fn(*end);
+
+        Ok(*end)
+    }
+}
+
 impl<K, V> Trie<K, V> {
     /// Creates a new [Trie] with no keys and records. This will
     /// create a [Trie] with a capacity of zero using the [Trie::with_capacity] method.
@@ -116,166 +292,6 @@ impl<K, V> Trie<K, V> {
             root: NodeIndex { position: 0 },
             size: 0,
         }
-    }
-    /// Gets the entrypoint of the tree by traversing the root. In the case
-    /// where the iterator is empty, we will just return the root.
-    fn get_entrypoint<I>(&self, key: &mut I) -> (Option<&NodeIndex>, Option<K>)
-    where
-        I: Iterator<Item = K>,
-        K: Ord,
-    {
-        match key.next() {
-            Some(first) => (self.node[self.root].get(&first, &self.node), Some(first)),
-            // We just return the root node.
-            None => (Some(&self.root), None),
-        }
-    }
-
-    /// Performs an internal wlak of the [Trie] but
-    /// receives the last node.
-    fn internal_walk_with_index<'a, I>(
-        &self,
-        remainder: &'a mut Peekable<I>,
-    ) -> Result<NodeIndex, WalkFailure<'a, Peekable<I>>>
-    where
-        I: Iterator<Item = K>,
-        K: Ord,
-    {
-        self.internal_walk_with_fn(remainder, |_| {})
-    }
-
-    /// Performs an internal walk of the [Trie] and obtains the path
-    /// used to get there. Internally, this just calls the internal walk
-    /// function and has it collect the nodes as we go.
-    fn internal_walk_with_path<'a, I>(
-        &self,
-        remainder: &'a mut Peekable<I>,
-    ) -> Result<WalkTrajectory, WalkFailure<'a, Peekable<I>>>
-    where
-        I: Iterator<Item = K>,
-        K: Ord,
-    {
-        self.internal_walk_with_path_fn(remainder, |_| {})
-    }
-
-    /// Performs an internal walk of the [Trie] and obtains the path
-    /// used to get there. Internally, this just calls the internal walk
-    /// function and has it collect the nodes as we go.
-    fn internal_walk_with_path_fn<'a, I, F>(
-        &self,
-        remainder: &'a mut Peekable<I>,
-        mut functor: F
-    ) -> Result<WalkTrajectory, WalkFailure<'a, Peekable<I>>>
-    where
-        I: Iterator<Item = K>,
-        K: Ord,
-        F: FnMut(NodeIndex)
-    {
-        let mut trajectory_path = vec![];
-
-        let end = self.internal_walk_with_fn(remainder, |node| {
-            trajectory_path.push(node);
-            functor(node);
-        })?;
-
-        Ok(WalkTrajectory {
-            path: trajectory_path,
-            end,
-        })
-    }
-
-    /// Collects the key
-    fn key_collect<'a>(&'a self, node: NodeIndex, array: &mut Vec<&'a K>)  {
-        if let Some(inner) = self.node[node].key() {
-            array.push(inner);
-        }
-    }
-
-    fn internal_walk_collect_key<'a, I, J>(
-        &self,
-        remainder: &'a mut Peekable<I>,
-    ) -> Result<(J, NodeIndex), WalkFailure<'a, Peekable<I>>>
-    where
-        I: Iterator<Item = K>,
-        K: Ord,
-        for<'b> J: FromIterator<&'b K>,
-    {
-        let mut collector = vec![];
-        let index = self.internal_walk_with_fn(remainder, |nk| {
-            self.key_collect(nk, &mut collector);
-        })?;
-        Ok((collector.into_iter().collect::<J>(), index))
-    }
-
-    /// Performs an internal walk of the [Trie]. This is the most important function
-    /// for the operation of the [Trie]. It takes in a visitor function that is called
-    /// every time a nodes key is accessed, this allows for activities such as collecting
-    /// the key.
-    /// 
-    /// If the walk is fully succesful, as in we can propery traverse the path to the end, we
-    /// return the [NodeIndex] of the last node.
-    /// 
-    /// If the walk cannot be completed, we return a [WalkFailure] struct that contains the necessary
-    /// information to perform insertion.
-    fn internal_walk_with_fn<'a, I, F>(
-        &self,
-        remainder: &'a mut Peekable<I>,
-        mut visitor_fn: F,
-    ) -> Result<NodeIndex, WalkFailure<'a, Peekable<I>>>
-    where
-        I: Iterator<Item = K>,
-        K: Ord,
-        F: FnMut(NodeIndex),
-    {
-        // The root for the path.
-        visitor_fn(self.root);
-
-        
-        // let (left, first) = match remainder.next() {
-        //     Some(first) => (self.node[self.root].get(&first, &self.node), Some(first)),
-        //     // We just return the root node.
-        //     None => (Some(&self.root), None),
-        // };
-         
-
-        // // let (left, first) = self.get_entrypoint(remainder);
-        // if left.is_none() {
-        //     return Err(WalkFailure {
-        //         root: None,
-        //         first,
-        //         remainder,
-        //     });
-        // }
-
-        println!("Starting walk...");
-
-        let mut end = &self.root;
-        loop {
-            let Some(current) = remainder.peek() else {
-                break;
-            };
-
-            // println!("Progrssing: {:?} {:?}", end, self.node[*end].get(&current, &self.node));
-
-         
-            visitor_fn(*end);
-
-            if let Some(slot) = self.node[*end].get(&current, &self.node) {
-                end = slot;
-            } else {
-                return Err(WalkFailure {
-                    root: *end,
-                    remainder,
-                });
-            }
-
-            // Actually consume.
-            remainder.next();
-        }
-
-        visitor_fn(*end);
-
-        Ok(*end)
     }
 
     /// Looks up the node pool index for a certain key,
@@ -951,8 +967,6 @@ impl<K, V> Trie<K, V> {
         Some((key, self.node[value].value_mut().as_mut().unwrap()))
     }
 
-    
-
     /// Removes a key from the [Trie], returning the computed key and value
     /// if the key was previously in the map.
     ///
@@ -975,10 +989,11 @@ impl<K, V> Trie<K, V> {
     {
         self.skip_trie_consistency()?;
 
-        
         let mut path = vec![];
         let trajectory = self
-            .internal_walk_with_path_fn(key.into_iter().peekable().by_ref(), |nk| self.key_collect(nk, &mut path))
+            .internal_walk_with_path_fn(key.into_iter().peekable().by_ref(), |nk| {
+                self.key_collect(nk, &mut path)
+            })
             .ok()?;
 
         let mut traj_path = trajectory.path.iter().rev().peekable();
@@ -1858,23 +1873,26 @@ mod tests {
     pub fn path_traversal_test() {
         let mut tree = Trie::<char, &str>::new();
         tree.insert(['t', 'e', 's', 't'], "sample_1");
-
-        println!("TREE: {:?}", tree);
-
-        let mut tracker = vec![];
-        
-        println!("Traversal: {:?}", tree.internal_walk_with_fn(['t', 'e', 'a'].into_iter().peekable().by_ref(), |nk| {
-
-            println!("Progressing @ {nk:?} {:?}", tree.node[nk]);
-            println!("Value @ {nk:?} {:?}", tree.node[nk].get(&'t', &tree.node));
-            tree.key_collect(nk, &mut tracker);
-        }));
+        tree.insert("tea".chars(), "Sample_2");
 
 
-        
-        
+        // for path in tree.complete_walk() {
+        //     println!("Yielded, {:?}", path);
+        // }
+        // println!("TREE: {:?}", tree);
 
-        // panic!("Hello {:?}", tracker);
+        // let mut tracker = vec![];
+
+        // println!(
+        //     "Traversal: {:?}",
+        //     tree.internal_walk_with_fn(['t', 'e', 'a'].into_iter().peekable().by_ref(), |nk| {
+        //         println!("Progressing @ {nk:?} {:?}", tree.node[nk]);
+        //         println!("Value @ {nk:?} {:?}", tree.node[nk].get(&'t', &tree.node));
+        //         tree.key_collect(nk, &mut tracker);
+        //     })
+        // );
+
+        // panic!("Hello {:?}", 3);
     }
 
     #[test]
