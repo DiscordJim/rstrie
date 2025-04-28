@@ -3,15 +3,18 @@ use std::fmt::Debug;
 
 use slotmap::SlotMap;
 
-use crate::NodeKey;
+use crate::{NodeIndex, Slots};
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Node<K, V> {
     key: Option<K>,
-    pub(crate) sub_keys: Vec<NodeKey>,
+    pub(crate) sub_keys: Vec<NodeIndex>,
     value: Option<V>,
-    parent: Option<NodeKey>
+    pub(crate) parent: Option<NodeIndex>
 }
+
+
+
 
 impl<K, V> Node<K, V>
 {
@@ -23,7 +26,7 @@ impl<K, V> Node<K, V>
             parent: None
         }
     }
-    pub fn keyed(key: K, parent: NodeKey) -> Self {
+    pub fn keyed(key: K, parent: NodeIndex) -> Self {
         Self {
             sub_keys: Vec::default(),
             value: None,
@@ -41,10 +44,10 @@ impl<K, V> Node<K, V> {
     pub fn is_root(&self) -> bool {
         self.key.is_none()
     }
-    pub fn parent(&self) -> Option<NodeKey> {
+    pub fn parent(&self) -> Option<NodeIndex> {
         self.parent.clone()
     }
-    pub fn get(&self, key: &K, buffer: &SlotMap<NodeKey, Node<K, V>>) -> Option<&NodeKey>
+    pub fn get(&self, key: &K, buffer: &Slots<K, V>) -> Option<&NodeIndex>
     where 
         K: Ord
     {
@@ -52,7 +55,7 @@ impl<K, V> Node<K, V> {
         Some(val?)
     }
   
-    // pub fn insert(&mut self, key: K, value: NodeKey) -> Option<NodeKey>
+    // pub fn insert(&mut self, key: K, value: NodeIndex) -> Option<NodeIndex>
     // where 
     //     K: Ord
     // {
@@ -77,7 +80,7 @@ impl<K, V> Node<K, V> {
 
     //     // old
     // }
-    pub fn bin_search(&self, reference: NodeKey, buffer: &SlotMap<NodeKey, Node<K, V>>) -> Result<usize, usize>
+    pub fn bin_search(&self, reference: NodeIndex, buffer: &Slots<K, V>) -> Result<usize, usize>
     where 
         K: Ord,
     {
@@ -86,7 +89,7 @@ impl<K, V> Node<K, V> {
             buffer[*node].key.as_ref().unwrap().cmp(key)
         })
     }
-    // pub fn remove(&mut self, key: &K) -> Option<NodeKey>
+    // pub fn remove(&mut self, key: &K) -> Option<NodeIndex>
     // where 
     //     K: Ord
     // {
@@ -105,4 +108,6 @@ impl<K, V> Node<K, V> {
         &mut self.value
     }
 }
+
+
 

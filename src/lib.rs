@@ -5,9 +5,10 @@ use std::{
     marker::PhantomData,
     ops::{Index, IndexMut},
     ptr::NonNull,
-    vec,
+    vec::Vec
 };
 
+use list::{NodeIndex, NodeIterMut, Slots};
 use node::Node;
 use slotmap::{
     SlotMap,
@@ -17,18 +18,21 @@ use slotmap::{
 mod iter;
 mod node;
 
+mod list;
+
 pub use crate::iter::StrIter;
 
-slotmap::new_key_type! { struct NodeKey; }
+
 
 #[derive(Debug, Clone)]
 /// A data strucur
 pub struct Trie<K, V> {
     /// The node pool, this is where the internal nodes are actually store. This
     /// improves cache locality and ease of access while limiting weird lifetime errors.
-    node: SlotMap<NodeKey, Node<K, V>>,
+    node: Slots<K, V>,
+    // node: SlotMap<NodeKey, Node<K, V>>,
     /// The root node of the pool. This is where things actually start searching.
-    root: NodeKey,
+    root: NodeIndex,
     /// The amount of items in the Trie.
     size: usize,
 }
@@ -50,7 +54,7 @@ pub struct Trie<K, V> {
 /// up until 'e' and then it would diverge.
 struct WalkFailure<'a, I, K> {
     /// The root of the walk.
-    root: Option<NodeKey>,
+    root: Option<NodeIndex>,
     /// The first node in the walk.
     first: Option<K>,
     /// The remainder of the path as an iterator.
@@ -59,8 +63,8 @@ struct WalkFailure<'a, I, K> {
 
 #[derive(Debug)]
 struct WalkTrajectory {
-    path: Vec<NodeKey>,
-    end: NodeKey,
+    path: Vec<NodeIndex>,
+    end: NodeIndex,
 }
 
 impl<K, V> Default for Trie<K, V> {
@@ -91,7 +95,7 @@ impl<K, V> Trie<K, V> {
     /// assert!(tree.is_empty());
     /// ```
     pub fn with_capacity(slots: usize) -> Self {
-        let mut node = SlotMap::with_capacity_and_key(slots);
+        let mut node = Slots::with_capacity(slots);
         let root = node.insert(Node::root());
         Self {
             node,
@@ -101,7 +105,7 @@ impl<K, V> Trie<K, V> {
     }
     /// Gets the entrypoint of the tree by traversing the root. In the case
     /// where the iterator is empty, we will just return the root.
-    fn get_entrypoint<I>(&self, key: &mut I) -> (Option<&NodeKey>, Option<K>)
+    fn get_entrypoint<I>(&self, key: &mut I) -> (Option<&NodeIndex>, Option<K>)
     where
         I: Iterator<Item = K>,
         K: Ord,
@@ -178,7 +182,7 @@ impl<K, V> Trie<K, V> {
     /// the key is an iterator over the prefixes. For instance,
     /// for strings this would be characters. This method forms the basis
     /// for [Trie::get] and [Trie::get_mut].
-    fn lookup_key<I>(&self, key: I) -> Option<NodeKey>
+    fn lookup_key<I>(&self, key: I) -> Option<NodeIndex>
     where
         I: IntoIterator<Item = K>,
         K: Ord,
@@ -198,7 +202,7 @@ impl<K, V> Trie<K, V> {
         // The index of the prior completion root.
         current: usize,
         // The index of the current node.
-        index: NodeKey,
+        index: NodeIndex,
     ) {
         for link in &self.node[index].sub_keys {
             let key = self.node[*link].key().as_ref().unwrap();
@@ -284,7 +288,7 @@ impl<K, V> Trie<K, V> {
     ///
     /// This will reconstruct it into a new type that can be created from
     /// an iterator of the node key types.
-    fn reconstruct_node_key<J>(&self, key: NodeKey) -> Option<J>
+    fn reconstruct_node_key<J>(&self, key: NodeIndex) -> Option<J>
     where
         for<'a> J: FromIterator<&'a K>,
     {
@@ -319,7 +323,7 @@ impl<K, V> Trie<K, V> {
     /// ```
     pub fn values<'a>(&'a self) -> ValueIterRef<'a, K, V> {
         ValueIterRef {
-            values: self.node.values(),
+            values: self.node.slots.iter(),
         }
     }
 
@@ -350,7 +354,7 @@ impl<K, V> Trie<K, V> {
     /// ```
     pub fn values_mut<'a>(&'a mut self) -> ValueIterMut<'a, K, V> {
         ValueIterMut {
-            values: self.node.values_mut(),
+            values: self.node.slots.iter_mut()
         }
     }
 
@@ -383,7 +387,7 @@ impl<K, V> Trie<K, V> {
         let values = self
             .node
             .drain()
-            .map(|(_, v)| v.into_value())
+            .map(|v| v.into_value())
             .filter(Option::is_some)
             .collect::<Vec<Option<V>>>();
 
@@ -425,7 +429,7 @@ impl<K, V> Trie<K, V> {
         }
     }
 
-    fn collect_entry_partial<J>(&self) -> Vec<(J, NodeKey)>
+    fn collect_entry_partial<J>(&self) -> Vec<(J, NodeIndex)>
     where
         for<'a> J: FromIterator<&'a K>,
     {
@@ -531,7 +535,7 @@ impl<K, V> Trie<K, V> {
             .unwrap();
 
         EntryIterMut {
-            inner: keys.into_iter().zip(self.node.iter_mut()),
+            inner: keys.into_iter().zip(self.node.node_iter_mut()),
             _type: PhantomData,
         }
     }
@@ -561,12 +565,12 @@ impl<K, V> Trie<K, V> {
     fn try_get_key_map<I, const N: usize>(
         &mut self,
         keys: [I; N],
-    ) -> Result<[Option<NodeKey>; N], NodeKey>
+    ) -> Result<[Option<NodeIndex>; N], NodeIndex>
     where
         I: IntoIterator<Item = K>,
         K: Ord,
     {
-        let mut array = [None::<NodeKey>; N];
+        let mut array = [None::<NodeIndex>; N];
 
         let mut i = 0;
         for k in keys.into_iter() {
@@ -613,7 +617,7 @@ impl<K, V> Trie<K, V> {
     /// Using an array of node keys, fetch many mutable pointers.
     fn get_many_mut_ptr<const N: usize>(
         &mut self,
-        keys: [Option<NodeKey>; N],
+        keys: [Option<NodeIndex>; N],
     ) -> [Option<NonNull<V>>; N] {
         let mut many: [Option<NonNull<V>>; N] = core::array::from_fn(|_| None);
 
@@ -621,9 +625,7 @@ impl<K, V> Trie<K, V> {
             match keys[i] {
                 Some(inner) => {
                     let fetched = self
-                        .node
-                        .get_mut(inner)
-                        .unwrap()
+                        .node[inner]
                         .value_mut()
                         .as_mut()
                         .unwrap() as *mut V;
@@ -751,11 +753,11 @@ impl<K, V> Trie<K, V> {
         self.size = 0;
     }
 
-    /// Reserves capacity for at least additional more elements to be inserted in the [Trie].
-    /// The collection may reserve more space to avoid frequent reallocations.
-    pub fn reserve(&mut self, space: usize) {
-        self.node.reserve(space);
-    }
+    // /// Reserves capacity for at least additional more elements to be inserted in the [Trie].
+    // /// The collection may reserve more space to avoid frequent reallocations.
+    // pub fn reserve(&mut self, space: usize) {
+    //     self.node.reserve(space);
+    // }
     /// Deletes a record from the [Trie] according to the
     /// key. It will return the old value if it is present within the
     /// data structure.
@@ -939,10 +941,10 @@ struct Completion<'a, K> {
 
 
 fn insert_node_subkey<K: Ord, V>(
-    source: NodeKey,
-    value: NodeKey,
-    buffer: &mut SlotMap<NodeKey, Node<K, V>>,
-) -> Option<NodeKey> {
+    source: NodeIndex,
+    value: NodeIndex,
+    buffer: &mut Slots<K, V>
+) -> Option<NodeIndex> {
     match buffer[source].bin_search(value, buffer) {
         Ok(valid) => {
             let old = std::mem::replace(&mut buffer[source].sub_keys[valid], value);
@@ -958,10 +960,10 @@ fn insert_node_subkey<K: Ord, V>(
 }
 
 fn remove_node_subkey_by_key<K: Ord, V>(
-    source: NodeKey,
-    to_remove: NodeKey,
-    buffer: &mut SlotMap<NodeKey, Node<K, V>>,
-) -> Option<NodeKey> {
+    source: NodeIndex,
+    to_remove: NodeIndex,
+    buffer: &mut Slots<K, V>,
+) -> Option<NodeIndex> {
     let result = buffer[source].sub_keys.iter().position(|s| *s == to_remove)?;
 
     let elem = buffer[source].sub_keys.remove(result);
@@ -1057,11 +1059,10 @@ where
     }
 }
 
-/// An iterator created by consuming the [Trie].
-///
-/// Contains all the entries of the [Trie].
+// An iterator created by consuming the [Trie].
+// Contains all the entries of the [Trie].
 pub struct EntryIterMut<'a, K, V, J> {
-    inner: Zip<vec::IntoIter<J>, slotmap::basic::IterMut<'a, NodeKey, Node<K, V>>>,
+    inner: Zip<std::vec::IntoIter<J>, NodeIterMut<'a, K, V>>,
     _type: PhantomData<J>,
 }
 
@@ -1088,13 +1089,13 @@ pub struct ValueIter<V> {
 
 /// An iterator over the values of a [Trie].
 pub struct ValueIterRef<'a, K, V> {
-    values: Values<'a, NodeKey, Node<K, V>>,
+    values: std::slice::Iter<'a, Option<Node<K, V>>>,
 }
 
 /// An iterator over the values of a [Trie]
 /// that provides mutable references.
 pub struct ValueIterMut<'a, K, V> {
-    values: ValuesMut<'a, NodeKey, Node<K, V>>,
+    values: std::slice::IterMut<'a, Option<Node<K, V>>>
 }
 
 impl<'a, K, V, J> Iterator for EntryIterMut<'a, K, V, J> {
@@ -1134,6 +1135,48 @@ impl<'a, K, V, J> Iterator for EntryIterMut<'a, K, V, J> {
             Some((key, value.value_mut().as_mut().unwrap()))
         }
     }
+}
+
+impl<K, V> PartialEq for Trie<K, V>
+where 
+    K: Eq
+{
+    /// Checks if two [Trie] are equal.
+    fn eq(&self, other: &Self) -> bool {
+        for node in self.node.slots.iter().filter(|f| f.is_some()).map(|f|f.as_ref().unwrap()) {
+            if !other.node.slots.iter().filter(|f| f.is_some()).map(|f| f.as_ref().unwrap()).any(|o_node| {
+                node.key() == o_node.key() // make the keys equal.
+                && check_node_key_equivalences(node, o_node, &self.node, &other.node)
+                && check_node_key_equivalences(o_node, node, &other.node, &self.node)
+            }) {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+
+fn check_node_key_equivalences<K, V>(
+    node_a: &Node<K, V>,
+    node_b: &Node<K, V>,
+    pool_a: &Slots<K, V>,
+    pool_b: &Slots<K, V>
+) -> bool
+where
+    K: Eq
+{
+
+    node_a.sub_keys.iter().all(|key_a| {
+        // For every a key.
+        let value = pool_a[*key_a].key();
+        node_b.sub_keys.iter().any(|key_b| pool_b[*key_b].key() == value)
+    });
+
+
+    true
+
 }
 
 impl<J, V> Iterator for EntryIter<J, V> {
@@ -1232,12 +1275,25 @@ impl<'a, K, V> Iterator for ValueIterMut<'a, K, V> {
     fn next(&mut self) -> Option<Self::Item> {
         let mut current = None;
         while current.is_none() {
+            // The INITIAL option can be propagated because this is the iterator one,
+            // so if this is none then we are done anyways.
             let node = self.values.next()?;
-            current = node.value_mut().as_mut();
+            // We need to extract the value, and we continue until the value is something.
+            current = map_node_to_value_mut(node.as_mut());
         }
 
         current
     }
+}
+
+fn map_node_to_value_mut<K, V>(option: Option<&mut Node<K, V>>) -> Option<&mut V> {
+    let val = option?;
+    val.value_mut().as_mut()
+}
+
+fn map_node_to_value<K, V>(option: Option<&Node<K, V>>) -> Option<&V> {
+    let val = option?;
+    val.value().as_ref()
 }
 
 impl<'a, K, V> Iterator for ValueIterRef<'a, K, V> {
@@ -1263,8 +1319,11 @@ impl<'a, K, V> Iterator for ValueIterRef<'a, K, V> {
     fn next(&mut self) -> Option<Self::Item> {
         let mut current = None;
         while current.is_none() {
+            // The INITIAL option can be propagated because this is the iterator one,
+            // so if this is none then we are done anyways.
             let node = self.values.next()?;
-            current = node.value().as_ref();
+            // We need to extract the value, and we continue until the value is something.
+            current = map_node_to_value(node.as_ref());
         }
 
         current
@@ -1407,7 +1466,7 @@ mod tests {
         println!("INSERTING TEA...");
         tree.insert("tea".chars(), "sample_3");
 
-        for (key, value) in &tree.node {
+        for (key, value) in tree.node.iter() {
             println!("({key:?}) -> {value:?}");
         }
 
