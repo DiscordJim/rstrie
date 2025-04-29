@@ -3,9 +3,9 @@ use std::{
     fmt::Debug,
     iter::{Peekable, Zip},
     marker::PhantomData,
-    ops::{Index, IndexMut},
+    ops::{Deref, DerefMut, Index, IndexMut},
     ptr::NonNull,
-    vec::Vec,
+    vec::{IntoIter, Vec},
 };
 
 use list::{NodeIndex, NodeIterMut, Slots};
@@ -76,23 +76,27 @@ impl<K, V> Default for Trie<K, V> {
     }
 }
 
-struct WalkIter<'a, K, V> {
-    trie: &'a Trie<K, V>,
-    pending: Vec<Vec<NodeIndex>>
+#[derive(Debug)]
+struct WalkCtx {
+    pending: Vec<Vec<NodeIndex>>,
 }
 
-impl<'a, K: Debug + Ord, V> Iterator for WalkIter<'a, K, V> {
-    type Item = (NodeIndex, Vec<NodeIndex>);
-    fn next(&mut self) -> Option<Self::Item> {
+struct WalkIter<'a, K, V> {
+    trie: &'a Trie<K, V>,
+    context: WalkCtx,
+}
 
+impl WalkCtx {
+    /// Drives this forward, this is similar to the
+    pub fn drive<K, V>(&mut self, trie: &Trie<K, V>) -> Option<(NodeIndex, Vec<NodeIndex>)> {
         while let Some(pending) = self.pending.pop() {
             let current = pending.last().unwrap();
-            if self.trie.node[*current].value().is_some() {
+            if trie.node[*current].value().is_some() {
                 // We have reached a root.
                 return Some((*current, pending));
             }
 
-            for &child in self.trie.node[*current].sub_keys.iter().rev() {
+            for &child in trie.node[*current].sub_keys.iter().rev() {
                 // Create a new path.
                 let mut new_path = pending.clone();
                 new_path.push(child);
@@ -101,11 +105,31 @@ impl<'a, K: Debug + Ord, V> Iterator for WalkIter<'a, K, V> {
         }
 
         None
-    }   
+    }
+}
+
+impl<'a, K, V> Iterator for WalkIter<'a, K, V> {
+    type Item = (NodeIndex, Vec<NodeIndex>);
+    fn next(&mut self) -> Option<Self::Item> {
+        self.context.drive(self.trie)
+    }
 }
 
 // The following are the internal 'developer' functions of the [Trie].
 impl<K, V> Trie<K, V> {
+    fn collect_path_keys<'a, J>(&'a self, nodes: &[NodeIndex]) -> J
+    where 
+        J: FromIterator<&'a K>
+    {
+        nodes
+            .iter()
+            .map(|f| self.node[*f].key())
+            .filter(|f| f.is_some())
+            .map(|f| f.as_ref().unwrap())
+            .collect()
+    }
+
+
     /// Performs an internal wlak of the [Trie] but
     /// receives the last node.
     fn internal_walk_with_index<'a, I>(
@@ -181,23 +205,25 @@ impl<K, V> Trie<K, V> {
         Ok((collector.into_iter().collect::<J>(), index))
     }
 
-    fn complete_walk(&self) -> WalkIter<'_, K, V> {
+    fn perform_walk(&self, root: NodeIndex) -> WalkCtx {
         // self.walk_path(self.root);
-        WalkIter { trie: self, pending: vec![ vec![ self.root ] ]  }
+        WalkCtx {
+            pending: vec![vec![root]],
+        }
     }
 
-    fn walk_path(&self, current: NodeIndex) {
-        
-        println!("Walking from {current:?}");
-        if self.node[current].value().is_some() {
-            println!("TERMINAL");
-        }
-        for key in &self.node[current].sub_keys {
-            println!("({current:?}) --> ({key:?})");
-            self.walk_path(*key);
-        }
+    // fn walk_path(&self, current: NodeIndex) {
 
-    }
+    //     println!("Walking from {current:?}");
+    //     if self.node[current].value().is_some() {
+    //         println!("TERMINAL");
+    //     }
+    //     for key in &self.node[current].sub_keys {
+    //         println!("({current:?}) --> ({key:?})");
+    //         self.walk_path(*key);
+    //     }
+
+    // }
 
     /// Performs an internal walk of the [Trie]. This is the most important function
     /// for the operation of the [Trie]. It takes in a visitor function that is called
@@ -310,37 +336,35 @@ impl<K, V> Trie<K, V> {
         )
     }
 
-    /// Traverses all the possible completions recursively, building
-    /// out all the possible values.
-    fn traverse_completions<'a, J>(
-        &'a self,
-        pool: &mut CompletionIter<'a, K, J>,
-        // The index of the prior completion root.
-        current: usize,
-        // The index of the current node.
-        index: NodeIndex,
-    ) {
-        for link in &self.node[index].sub_keys {
-            let key = self.node[*link].key().as_ref().unwrap();
-            let cur = Completion {
-                value: vec![key],
-                previous: Some(current),
-            };
+    /// Checks if a key is a prefix within a [Trie]. This
+    /// may or may not be an exact math.
+    /// 
+    /// # Examples
+    /// ```
+    /// use rstrie::Trie;
+    /// 
+    /// let mut trie = Trie::<char, ()>::new();
+    /// trie.insert("hello".chars(), ());
+    /// trie.insert("hey".chars(), ());
+    /// trie.insert("hero".chars(), ());
+    /// 
+    /// assert!(trie.is_prefix(['h', 'e']));
+    /// assert!(trie.is_prefix(['h', 'e', 'r']));
+    /// assert!(!trie.is_prefix(['h', 'e', 'r', 'y']));
+    /// ```
+    pub fn is_prefix<I>(&self, key: I) -> bool
+    where 
+        I: IntoIterator<Item = K>,
+        K: Ord
+    {
+        self.skip_trie_consistency();
+        self.internal_walk_with_index(&mut key.into_iter().peekable())
+            .is_ok()
 
-            let cur_index = pool.completion.len();
-            pool.completion.push(cur);
-
-            if self.node[*link].value().is_some() {
-                pool.traversal.push(cur_index);
-            }
-
-            self.traverse_completions(pool, cur_index, *link);
-        }
     }
-
     /// Gets all the completions of a key. This will
     /// traverse the tree to the point at which the key
-    /// diverges.
+    /// diverges. This is also called a 'common prefix search'.
     ///
     ///
     /// # Examples
@@ -350,6 +374,7 @@ impl<K, V> Trie<K, V> {
     /// let mut tree = Trie::<char, ()>::new();
     /// tree.insert("hello".chars(), ());
     /// tree.insert("hey".chars(), ());
+    /// tree.insert("james".chars(), ());
     ///
     ///
     /// println!("Tree: {:?}", tree);
@@ -357,70 +382,89 @@ impl<K, V> Trie<K, V> {
     /// let mut values = tree.completions::<_, String>("he".chars())
     ///     .into_iter()
     ///     .collect::<Vec<_>>();
+    /// assert_eq!(values.len(), 2);
     ///
-    /// values.sort();
     ///
-    ///
-    /// assert_eq!(values[0], "hello");
-    /// assert_eq!(values[1], "hey");
+    /// assert_eq!(values[0].0, "hello");
+    /// assert_eq!(values[1].0, "hey");
     /// ```
-    pub fn completions<I, J>(&self, key: I) -> CompletionIter<'_, K, J>
+    pub fn completions<I, J>(&self, key: I) -> CompletionIter<'_, K, V, J>
     where
         I: IntoIterator<Item = K>,
         K: Ord,
         J: FromIterator<K>,
     {
-        let mut binding = key.into_iter().peekable();
-        let Ok(result) = self.internal_walk_with_path(binding.by_ref()) else {
-            // There were no additional paths.
-            return CompletionIter {
-                completion: vec![],
+        let mut collector = vec![];
+        match self.internal_walk_with_fn(key.into_iter().peekable().by_ref(), |nk| {
+            self.key_collect(nk, &mut collector)
+        }) {
+            Ok(inner) => CompletionIter {
+                beginning: collector,
+                inner: self.perform_walk(inner),
+                trie: self,
                 _transform: PhantomData,
-                traversal: vec![],
-            };
-        };
-
-        let mut col = vec![];
-        for i in result.path {
-            let Some(word) = self.node[i].key() else {
-                continue;
-            };
-            col.push(word);
+            },
+            Err(_) => {
+                // Here we will create something that just will not iterate.
+                CompletionIter {
+                    beginning: vec![],
+                    _transform: PhantomData,
+                    inner: WalkCtx { pending: vec![] },
+                    trie: self,
+                }
+            }
         }
-
-        let mut pool = CompletionIter {
-            completion: vec![Completion {
-                value: col,
-                previous: None,
-            }],
-            _transform: PhantomData,
-            traversal: vec![],
-        };
-
-        self.traverse_completions(&mut pool, 0, result.end);
-
-        pool
     }
 
-    /// Reconstructs a key by traversing up the [Trie] structure.
+    /// Performs a postfix search of the tree, returning
+    /// the postfixes.
     ///
-    /// This will reconstruct it into a new type that can be created from
-    /// an iterator of the node key types.
-    fn reconstruct_node_key<J>(&self, key: NodeIndex) -> Option<J>
+    ///
+    /// # Examples
+    /// ```
+    /// use rstrie::Trie;
+    ///
+    /// let mut tree = Trie::<char, ()>::new();
+    /// tree.insert("hello".chars(), ());
+    /// tree.insert("hey".chars(), ());
+    /// tree.insert("james".chars(), ());
+    ///
+    /// let mut values = tree.postfix_search::<_, String>("he".chars())
+    ///     .into_iter()
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(values.len(), 2);
+    ///
+    ///
+    /// assert_eq!(values[0].0, "llo");
+    /// assert_eq!(values[1].0, "y");
+    /// ```
+    pub fn postfix_search<I, J>(&self, key: I) -> PostfixIter<'_, K, V, J>
     where
-        for<'a> J: FromIterator<&'a K>,
+        I: IntoIterator<Item = K>,
+        K: Ord,
+        J: FromIterator<K>,
     {
-        let mut node = &self.node[key];
-
-        let mut deque = VecDeque::new();
-        while node.parent().is_some() {
-            deque.push_front(node.key().as_ref().unwrap());
-
-            node = &self.node[node.parent().unwrap()];
+        let mut collector = vec![];
+        match self.internal_walk_with_fn(key.into_iter().peekable().by_ref(), |nk| {
+            self.key_collect(nk, &mut collector)
+        }) {
+            Ok(inner) => PostfixIter {
+                inner: self.perform_walk(inner),
+                trie: self,
+                _transform: PhantomData,
+            },
+            Err(_) => {
+                // Here we will create something that just will not iterate.
+                PostfixIter {
+                    _transform: PhantomData,
+                    inner: WalkCtx { pending: vec![] },
+                    trie: self,
+                }
+            }
         }
-
-        Some(deque.into_iter().collect())
     }
+
+
 
     /// Returns an iterator over the values of the [Trie]
     /// data structure.
@@ -567,39 +611,21 @@ impl<K, V> Trie<K, V> {
     ///
     /// let mut key_iter = tree.keys::<String>();
     ///
-    /// assert_eq!(key_iter.next().unwrap(), "hello");
     /// assert_eq!(key_iter.next().unwrap(), "bye");
+    /// assert_eq!(key_iter.next().unwrap(), "hello");
     /// assert!(key_iter.next().is_none());
     /// ```
-    pub fn keys<J>(&self) -> KeyIter<J>
+    pub fn keys<'a, J>(&'a self) -> KeyIter<'a, K, V, J>
     where
-        for<'a> J: FromIterator<&'a K>,
+        J: FromIterator<&'a K>,
     {
-        let values = self
-            .node
-            .iter()
-            .filter(|(_, v)| v.value().is_some())
-            .map(|(k, _)| k)
-            .map(|k| self.reconstruct_node_key::<J>(k))
-            .collect::<Vec<Option<J>>>();
-
         KeyIter {
-            inner: iter::Iter::new(values),
+            inner: WalkIter {
+                context: self.perform_walk(self.root),
+                trie: self,
+            },
+            _type: PhantomData,
         }
-    }
-
-    fn collect_entry_partial<J>(&self) -> Vec<(J, NodeIndex)>
-    where
-        for<'a> J: FromIterator<&'a K>,
-    {
-        self.node
-            .iter()
-            .filter(|(_, v)| v.value().is_some())
-            .map(|(key, _)| {
-                let construct = self.reconstruct_node_key::<J>(key);
-                (construct.unwrap(), key)
-            })
-            .collect()
     }
 
     /// Returns an iterator over the entries of the [Trie]
@@ -617,22 +643,18 @@ impl<K, V> Trie<K, V> {
     ///
     /// let mut key_iter = tree.into_entries::<String>();
     ///
-    /// assert_eq!(key_iter.next().unwrap(), ("hello".to_string(), 4));
     /// assert_eq!(key_iter.next().unwrap(), ("bye".to_string(), 3));
+    /// assert_eq!(key_iter.next().unwrap(), ("hello".to_string(), 4));
     /// assert!(key_iter.next().is_none());
     /// ```
-    pub fn into_entries<J>(mut self) -> EntryIter<J, V>
+    pub fn into_entries<J>(self) -> IntoEntryIter<K, V, J>
     where
         for<'a> J: FromIterator<&'a K>,
     {
-        // Convert into an owned iterator.
-        let values = self
-            .collect_entry_partial::<J>()
-            .into_iter()
-            .map(|(key, value)| Some((key, self.node[value].value_mut().take().unwrap())))
-            .collect::<Vec<_>>();
-        EntryIter {
-            inner: iter::Iter::new(values),
+        IntoEntryIter {
+            inner: self.perform_walk(self.root),
+            trie: self,
+            _type: PhantomData
         }
     }
     /// Returns an iterator over the entries of the [Trie]
@@ -650,22 +672,20 @@ impl<K, V> Trie<K, V> {
     ///
     /// let mut key_iter = tree.entries::<String>();
     ///
-    /// assert_eq!(key_iter.next().unwrap(), ("hello".to_string(), &4));
     /// assert_eq!(key_iter.next().unwrap(), ("bye".to_string(), &3));
+    /// assert_eq!(key_iter.next().unwrap(), ("hello".to_string(), &4));
     /// assert!(key_iter.next().is_none());
     /// ```
-    pub fn entries<J>(&self) -> EntryIter<J, &V>
+    pub fn entries<'a, J>(&'a self) -> EntryIterRef<'a, K, V, J>
     where
-        for<'a> J: FromIterator<&'a K>,
+        J: FromIterator<&'a K>,
     {
-        // Convert into an owned iterator.
-        let values = self
-            .collect_entry_partial::<J>()
-            .into_iter()
-            .map(|(key, value)| Some((key, self.node[value].value().as_ref().unwrap())))
-            .collect::<Vec<_>>();
-        EntryIter {
-            inner: iter::Iter::new(values),
+        EntryIterRef {
+            inner: WalkIter {
+                context: self.perform_walk(self.root),
+                trie: self
+            },
+            _type: PhantomData
         }
     }
 
@@ -680,26 +700,21 @@ impl<K, V> Trie<K, V> {
     ///     ("bye".chars(), 3)
     /// ]);
     ///
-    /// let mut key_iter = tree.entries::<String>();
+    /// let mut key_iter = tree.entries_mut::<String>();
     ///
-    /// assert_eq!(key_iter.next().unwrap(), ("hello".to_string(), &4));
-    /// assert_eq!(key_iter.next().unwrap(), ("bye".to_string(), &3));
+    /// assert_eq!(*key_iter.next().unwrap().1, 3);
+    /// assert_eq!(*key_iter.next().unwrap().1, 4);
     /// assert!(key_iter.next().is_none());
     /// ```
     pub fn entries_mut<J>(&mut self) -> EntryIterMut<'_, K, V, J>
     where
         for<'a> J: FromIterator<&'a K>,
     {
-        let keys = self
-            .node
-            .iter()
-            .map(|(k, _)| self.reconstruct_node_key::<J>(k))
-            .collect::<Option<Vec<_>>>()
-            .unwrap();
-
         EntryIterMut {
-            inner: keys.into_iter().zip(self.node.node_iter_mut()),
-            _type: PhantomData,
+            inner: self.perform_walk(self.root),
+            trie: self,
+            // slot: None,.
+            _type: PhantomData
         }
     }
 
@@ -1235,23 +1250,25 @@ impl<K, V> Trie<K, V> {
 // }
 
 #[derive(Debug)]
-pub struct CompletionIter<'a, K, J> {
+pub struct CompletionIter<'a, K, V, J> {
+    trie: &'a Trie<K, V>,
+    /// The root path.
+    beginning: Vec<&'a K>,
     /// The list of completions, this functions as a bump
     /// allocator and is used to build out the list.
-    completion: Vec<Completion<'a, K>>,
-
-    traversal: Vec<usize>,
-
+    inner: WalkCtx,
     /// The value to which the iterators will be transformed during iteration.
     _transform: PhantomData<J>,
 }
 
 #[derive(Debug)]
-struct Completion<'a, K> {
-    /// The actual underlying values.
-    value: Vec<&'a K>,
-    /// Stores the continuations.
-    previous: Option<usize>,
+pub struct PostfixIter<'a, K, V, J> {
+    trie: &'a Trie<K, V>,
+    /// The list of completions, this functions as a bump
+    /// allocator and is used to build out the list.
+    inner: WalkCtx,
+    /// The value to which the iterators will be transformed during iteration.
+    _transform: PhantomData<J>,
 }
 
 fn insert_node_subkey<K: Ord, V>(
@@ -1316,11 +1333,11 @@ where
     }
 }
 
-impl<'a, K: Debug, J> Iterator for CompletionIter<'a, K, J>
+impl<'a, K: Debug, V, J> Iterator for CompletionIter<'a, K, V, J>
 where
     J: FromIterator<&'a K>,
 {
-    type Item = J;
+    type Item = (J, &'a V);
 
     /// Gets the next completion. This is comptued lazily.
     ///
@@ -1339,22 +1356,84 @@ where
     /// values.sort();
     ///
     ///
-    /// assert_eq!(values[0], "hello");
-    /// assert_eq!(values[1], "hey");
+    /// assert_eq!(values[0].0, "hello");
+    /// assert_eq!(values[1].0, "hey");
     /// ```
     fn next(&mut self) -> Option<Self::Item> {
-        let mut verbiage = VecDeque::new();
+        let (current, path) = self.inner.drive(&self.trie)?;
 
-        let mut current = Some(self.traversal.pop()?);
-        while current.is_some() {
-            let current_node = &self.completion[current?];
+        let key = assemble_completion(&self.trie, &self.beginning, path);
 
-            verbiage.extend(current_node.value.iter().rev());
-            current = self.completion[current?].previous;
-        }
-
-        Some(verbiage.into_iter().rev().collect::<J>())
+        Some((key, self.trie.node[current].value().as_ref().unwrap()))
     }
+}
+
+impl<'a, K: Debug, V, J> Iterator for PostfixIter<'a, K, V, J>
+where
+    J: FromIterator<&'a K>,
+{
+    type Item = (J, &'a V);
+
+    /// Gets the next completion. This is comptued lazily.
+    ///
+    /// ```
+    /// use rstrie::Trie;
+    ///
+    /// let mut tree = Trie::<char, ()>::new();
+    /// tree.insert("hello".chars(), ());
+    /// tree.insert("hey".chars(), ());
+    ///
+    ///
+    /// let mut values = tree.postfix_search::<_, String>("he".chars())
+    ///     .into_iter()
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(values.len(), 2);
+    ///
+    ///
+    /// assert_eq!(values[0].0, "llo");
+    /// assert_eq!(values[1].0, "y");
+    /// ```
+    fn next(&mut self) -> Option<Self::Item> {
+        let (current, path) = self.inner.drive(&self.trie)?;
+
+        let key = path
+            .iter()
+            .map(|f| self.trie.node[*f].key())
+            .filter(|f| f.is_some())
+            .skip(1)
+            .map(|f| f.as_ref().unwrap());
+        Some((
+            key.collect(),
+            self.trie.node[current].value().as_ref().unwrap(),
+        ))
+    }
+}
+
+fn assemble_completion<'a, K, V, J>(
+    trie: &'a Trie<K, V>,
+    beginning: &Vec<&'a K>,
+    walked: Vec<NodeIndex>,
+) -> J
+where
+    J: FromIterator<&'a K>,
+{
+    let tail_end = walked
+        .into_iter()
+        .map(|nk| trie.node[nk].key())
+        .filter(|f| f.is_some())
+        .map(|f| f.as_ref().unwrap());
+
+    let actual_key = beginning
+        .iter()
+        // The following lines just omit the very last element.
+        .rev()
+        .skip(1)
+        .rev()
+        .map(|k| *k)
+        .chain(tail_end)
+        .collect::<J>();
+
+    actual_key
 }
 
 impl<K, V, I> IndexMut<I> for Trie<K, V>
@@ -1383,22 +1462,36 @@ where
 // An iterator created by consuming the [Trie].
 // Contains all the entries of the [Trie].
 pub struct EntryIterMut<'a, K, V, J> {
-    inner: Zip<std::vec::IntoIter<J>, NodeIterMut<'a, K, V>>,
+    // value: ValueIterMut<'a, K, V>,
+    trie: &'a mut Trie<K, V>,
+    inner: WalkCtx,
     _type: PhantomData<J>,
 }
 
 /// An iterator created by consuming the [Trie].
 ///
 /// Contains all the entries of the [Trie].
-pub struct EntryIter<J, V> {
-    inner: crate::iter::Iter<(J, V)>,
+pub struct IntoEntryIter<K, V, J> {
+    trie: Trie<K, V>,
+    inner: WalkCtx,
+    _type: PhantomData<J>
+}
+
+
+/// An iterator created by consuming the [Trie].
+///
+/// Contains all the entries of the [Trie].
+pub struct EntryIterRef<'a, K, V, J> {
+    inner: WalkIter<'a, K, V>,
+    _type: PhantomData<J>
 }
 
 /// An iterator created by consuming the [Trie].
 ///
 /// Contains all the keys of the [Trie].
-pub struct KeyIter<J> {
-    inner: crate::iter::Iter<J>,
+pub struct KeyIter<'a, K, V, J> {
+    inner: WalkIter<'a, K, V>,
+    _type: PhantomData<J>,
 }
 
 /// An iterator created by consuming the [Trie].
@@ -1419,8 +1512,54 @@ pub struct ValueIterMut<'a, K, V> {
     values: std::slice::IterMut<'a, Option<Node<K, V>>>,
 }
 
-impl<'a, K, V, J> Iterator for EntryIterMut<'a, K, V, J> {
-    type Item = (J, &'a mut V);
+// impl<'a, K, V, J> Iterator for EntryIter<'a, K, V, J>
+// where 
+//     J: FromIterator<&'a K>
+// {
+//     type Item = (J, &'a V);
+
+impl<K, V, J> Iterator for IntoEntryIter<K, V, J>
+where 
+     for<'b> J: FromIterator<&'b K>,
+     
+{
+    type Item = (J, V);
+
+    /// Iterates over the mutably borrowed entries within a [Trie].
+    /// ```
+    /// use rstrie::Trie;
+    ///
+    /// let mut tree = Trie::<char, usize>::from([
+    ///     ("hello".chars(), 4),
+    ///     ("bye".chars(), 3)
+    /// ]);
+    ///
+    /// let mut key_iter = tree.into_entries::<String>();
+    ///
+    /// assert_eq!(key_iter.next().unwrap(), ("bye".to_string(), 3));
+    /// assert_eq!(key_iter.next().unwrap(), ("hello".to_string(), 4));
+    /// assert!(key_iter.next().is_none());
+    /// ```
+    fn next(&mut self) -> Option<Self::Item> {
+        let (current, path) =  { self.inner.drive(&self.trie)? };
+
+        
+        let calced = self.trie.collect_path_keys::<J>(&path);
+        
+
+
+       
+       Some((calced, self.trie.node[current].value_mut().take().unwrap()))
+    }
+}
+
+
+impl<'a, K: Clone, V, J> Iterator for EntryIterMut<'a, K, V, J>
+where 
+     for<'b> J: FromIterator<&'b K>,
+     
+{
+    type Item = (J, ValueSlot<'a, K, V>);
 
     /// Iterates over the mutably borrowed entries within a [Trie].
     /// ```
@@ -1433,8 +1572,8 @@ impl<'a, K, V, J> Iterator for EntryIterMut<'a, K, V, J> {
     ///
     /// let mut key_iter = tree.entries_mut::<String>();
     ///
-    /// assert_eq!(*key_iter.next().unwrap().1, 4);
     /// assert_eq!(*key_iter.next().unwrap().1, 3);
+    /// assert_eq!(*key_iter.next().unwrap().1, 4);
     /// assert!(key_iter.next().is_none());
     ///
     /// let mut key_iter = tree.entries_mut::<String>();
@@ -1445,18 +1584,46 @@ impl<'a, K, V, J> Iterator for EntryIterMut<'a, K, V, J> {
     /// let mut key_iter = tree.entries_mut::<String>();
     ///
     /// assert_eq!(*key_iter.next().unwrap().1, 5);
-    /// assert_eq!(*key_iter.next().unwrap().1, 3);
+    /// assert_eq!(*key_iter.next().unwrap().1, 4);
     /// assert!(key_iter.next().is_none());
     /// ```
     fn next(&mut self) -> Option<Self::Item> {
-        let (key, (_, value)) = self.inner.next()?;
-        if value.value_mut().is_none() {
-            self.next()
-        } else {
-            Some((key, value.value_mut().as_mut().unwrap()))
-        }
+        let (current, path) =  { self.inner.drive(&self.trie)? };
+
+        
+        let calced = self.trie.collect_path_keys::<J>(&path);
+        
+
+
+        // SAFETY: The borrow checker does not know that subsequent calls return distinct
+        // nodes, and thus the aliasing rules are upheld and we only have a single mutable reference at a time.
+        let candidate = unsafe { &mut *(&mut self.trie.node[current] as *mut Node<K, V>)  };
+
+
+   
+        Some((calced, ValueSlot {
+            node: candidate
+        }))
     }
 }
+
+pub struct ValueSlot<'a, K, V> {
+    node: &'a mut Node<K, V>
+}
+
+impl<'a, K, V> Deref for ValueSlot<'a, K, V> {
+    type Target = V;
+    fn deref(&self) -> &Self::Target {
+        self.node.value().as_ref().unwrap()
+    }
+}
+
+impl<'a, K, V> DerefMut for ValueSlot<'a, K, V> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.node.value_mut_unchecked()
+    }
+}
+
 
 impl<K, V> PartialEq for Trie<K, V>
 where
@@ -1511,8 +1678,11 @@ where
     true
 }
 
-impl<J, V> Iterator for EntryIter<J, V> {
-    type Item = (J, V);
+impl<'a, K, V, J> Iterator for EntryIterRef<'a, K, V, J>
+where 
+    J: FromIterator<&'a K>
+{
+    type Item = (J, &'a V);
 
     /// Iterates over the owned entries within a [Trie].
     /// ```
@@ -1525,16 +1695,22 @@ impl<J, V> Iterator for EntryIter<J, V> {
     ///
     /// let mut key_iter = tree.into_entries::<String>();
     ///
-    /// assert_eq!(key_iter.next().unwrap(), ("hello".to_string(), 4));
+    /// 
     /// assert_eq!(key_iter.next().unwrap(), ("bye".to_string(), 3));
+    /// assert_eq!(key_iter.next().unwrap(), ("hello".to_string(), 4));
     /// assert!(key_iter.next().is_none());
     /// ```
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next()
+        let (curr, path) = self.inner.next()?;
+
+        Some((self.inner.trie.collect_path_keys(&path), self.inner.trie.node[curr].value().as_ref().unwrap()))
     }
 }
 
-impl<J> Iterator for KeyIter<J> {
+impl<'a, K, V, J> Iterator for KeyIter<'a, K, V, J>
+where
+    J: FromIterator<&'a K>,
+{
     type Item = J;
 
     /// Iterates over the owned keys within a [Trie].
@@ -1550,12 +1726,13 @@ impl<J> Iterator for KeyIter<J> {
     ///
     /// let mut values  = tree.keys::<String>();
     ///
-    /// assert_eq!(values.next().unwrap(), "hello");
     /// assert_eq!(values.next().unwrap(), "bye");
+    /// assert_eq!(values.next().unwrap(), "hello");
     /// assert_eq!(values.next().as_ref(), None);
     /// ```
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next()
+        let (_, path) = self.inner.next()?;
+        Some(self.inner.trie.collect_path_keys(&path))
     }
 }
 
@@ -1804,6 +1981,33 @@ mod tests {
     }
 
     #[test]
+    pub fn test_entry_mut() {
+
+        let mut tree = Trie::<char, usize>::from([
+            ("hello".chars(), 4),
+            ("bye".chars(), 3)
+        ]);
+        
+        let mut key_iter = tree.entries_mut::<String>();
+        
+        assert_eq!(*key_iter.next().unwrap().1, 3);
+        assert_eq!(*key_iter.next().unwrap().1, 4);
+        
+        assert!(key_iter.next().is_none());
+        
+        let mut key_iter = tree.entries_mut::<String>();
+        
+        *key_iter.next().unwrap().1 = 5;
+        
+        let mut key_iter = tree.entries_mut::<String>();
+        
+        assert_eq!(*key_iter.next().unwrap().1, 5);
+        assert_eq!(*key_iter.next().unwrap().1, 4);
+        assert!(key_iter.next().is_none());
+        
+    }
+
+    #[test]
     pub fn trie_from_tuples() {
         let trie: Trie<char, i32> = Trie::from([("hello".chars(), 4)]);
         assert_eq!(trie.get("hello".chars()), Some(&4));
@@ -1874,7 +2078,6 @@ mod tests {
         let mut tree = Trie::<char, &str>::new();
         tree.insert(['t', 'e', 's', 't'], "sample_1");
         tree.insert("tea".chars(), "Sample_2");
-
 
         // for path in tree.complete_walk() {
         //     println!("Yielded, {:?}", path);
@@ -1974,6 +2177,7 @@ mod tests {
         let mut tree = Trie::<char, ()>::new();
         tree.insert("hello".chars(), ());
         tree.insert("hey".chars(), ());
+        tree.insert("james".chars(), ());
 
         let mut values = tree
             .completions::<_, String>("he".chars())
@@ -1982,8 +2186,27 @@ mod tests {
 
         values.sort();
 
-        assert_eq!(values[0], "hello");
-        assert_eq!(values[1], "hey");
+        assert_eq!(values.len(), 2);
+
+        assert_eq!(values[0].0, "hello");
+        assert_eq!(values[1].0, "hey");
+
+        assert_eq!(
+            tree.completions::<_, String>([])
+                .map(|(a, _)| a)
+                .collect::<Vec<_>>(),
+            vec![
+                String::from("hello"),
+                String::from("hey"),
+                String::from("james")
+            ]
+        );
+        assert_eq!(
+            tree.completions::<_, String>(['h', 'e', 'l', 'l', 'o'])
+                .map(|(a, _)| a)
+                .collect::<Vec<_>>(),
+            vec![String::from("hello")]
+        );
     }
 
     #[test]

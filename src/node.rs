@@ -47,6 +47,9 @@ impl<K, V> Node<K, V> {
             .iter()
             .find(|k| key == buffer[**k].key().as_ref().unwrap())
     }
+    pub fn value_mut_unchecked(&mut self) -> &mut V {
+        self.value_mut().as_mut().unwrap()
+    }
 
     // pub fn insert(&mut self, key: K, value: NodeIndex) -> Option<NodeIndex>
     // where

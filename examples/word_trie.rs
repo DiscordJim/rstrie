@@ -45,7 +45,7 @@ pub fn main() {
 
     println!("TREE:\n{:?}", tree);
 
-    let completions: CompletionIter<'_, Word, Sentence> = tree.completions(Word::wordify("I like"));
+    let completions: CompletionIter<'_, Word, (), Sentence> = tree.completions(Word::wordify("I like"));
     println!("Competions:\n{:?}", completions);
 
     for comp in completions {
