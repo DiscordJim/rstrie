@@ -95,12 +95,7 @@ impl<K, V> Slots<K, V> {
 
         // Remap all the keys.
         for node in self.slots.iter_mut().filter(|f| f.is_some()).map(|f| f.as_mut().unwrap()) {
-            if let Some(par) = &mut node.parent {
-                if remapper.contains_key(par) {
-                    *par = *remapper.get(par).unwrap();
-                }
-            }  
-            
+
             for key in &mut node.sub_keys {
                 if remapper.contains_key(key) {
                     *key = *remapper.get(key).unwrap();
@@ -210,11 +205,7 @@ mod tests {
                 }
             }
 
-            if let Some(par) = slot.parent() {
-                if map.slots[par.position].is_none() {
-                    panic!("Parent reference has been made invalid.");
-                }
-            }
+         
 
         }
 
@@ -237,13 +228,13 @@ mod tests {
 
         let mut list = Slots::<char, String>::with_capacity(0);
         let key = list.insert(Node::root());
-        let bruha = list.insert(Node::keyed('a', key));
-        let bruh = list.insert(Node::keyed('b', key));
+        let bruha = list.insert(Node::keyed('a'));
+        let bruh = list.insert(Node::keyed('b'));
 
-        let bruhc = list.insert(Node::keyed('c', key));
-        let bruhd = list.insert(Node::keyed('d', key));
-        let bruhe = list.insert(Node::keyed('e', key));
-        let bruhf = list.insert(Node::keyed('f', bruhd));
+        let bruhc = list.insert(Node::keyed('c'));
+        let bruhd = list.insert(Node::keyed('d'));
+        let bruhe = list.insert(Node::keyed('e'));
+        let bruhf = list.insert(Node::keyed('f'));
 
         list[bruhf].sub_keys.push(bruhd);
   

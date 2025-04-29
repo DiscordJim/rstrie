@@ -7,7 +7,7 @@ pub(crate) struct Node<K, V> {
     key: Option<K>,
     pub(crate) sub_keys: Vec<NodeIndex>,
     value: Option<V>,
-    pub(crate) parent: Option<NodeIndex>,
+    // pub(crate) parent: Option<NodeIndex>,
 }
 
 impl<K, V> Node<K, V> {
@@ -16,15 +16,13 @@ impl<K, V> Node<K, V> {
             key: None,
             sub_keys: Vec::new(),
             value: None,
-            parent: None,
         }
     }
-    pub fn keyed(key: K, parent: NodeIndex) -> Self {
+    pub fn keyed(key: K) -> Self {
         Self {
             sub_keys: Vec::default(),
             value: None,
             key: Some(key),
-            parent: Some(parent),
         }
     }
 }
@@ -35,9 +33,6 @@ impl<K, V> Node<K, V> {
     }
     pub fn is_root(&self) -> bool {
         self.key.is_none()
-    }
-    pub fn parent(&self) -> Option<NodeIndex> {
-        self.parent.clone()
     }
     pub fn get(&self, key: &K, buffer: &Slots<K, V>) -> Option<&NodeIndex>
     where

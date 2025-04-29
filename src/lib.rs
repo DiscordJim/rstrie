@@ -1184,7 +1184,7 @@ impl<K, V> Trie<K, V> {
             }) => {
                 let mut nk = Some(root);
                 for item in remainder {
-                    nk = Some(self.node.insert(Node::keyed(item, root)));
+                    nk = Some(self.node.insert(Node::keyed(item)));
                     insert_node_subkey(root, nk.unwrap(), &mut self.node);
                     root = nk.unwrap();
                 }
