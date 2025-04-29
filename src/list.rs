@@ -14,12 +14,18 @@ pub(crate) struct NodeIndex {
     pub(crate) position: usize
 }
 
+impl NodeIndex {
+    pub const ROOT: NodeIndex = NodeIndex { position: 0 };
+}
+
 impl<K, V> Slots<K, V> {
     pub fn with_capacity(cap: usize) -> Self {
-        Self {
+        let mut new = Self {
             slots: Vec::with_capacity(cap),
-            free_list: vec![]
-        }
+            free_list: vec![ ]
+        };
+        new.slots.insert(0, Some(Node::root()));
+        new
     }
     pub fn insert(&mut self, item: Node<K, V>) -> NodeIndex {
         if !self.free_list.is_empty() {
@@ -43,20 +49,25 @@ impl<K, V> Slots<K, V> {
         }
         pos.take()
     }
-    //Map<Filter<Enumerate<std::slice::Iter<'_, Option<Node<K, V>>>>
     pub fn iter(&self) -> impl Iterator<Item = (NodeIndex, &Node<K, V>)> {
         self.slots.iter().enumerate()
             .filter(|(_, f)| f.is_some())
             .map(|(i, key)| (NodeIndex { position: i }, key.as_ref().unwrap()))
     }
     pub fn drain(&mut self) -> impl Iterator<Item = Node<K, V>> {
-        self.slots.drain(0..self.slots.len())
+        self.clear_root();
+        self.slots.drain(1..self.slots.len())
             // .enumerate()
-            .filter(|f| f.is_some())
-            .map(Option::unwrap)
+            .flatten()
+    }
+    fn clear_root(&mut self) {
+        
+        self[NodeIndex::ROOT].value_mut().take();
+        self[NodeIndex::ROOT].sub_keys.clear();
     }
     pub fn clear(&mut self) {
         self.slots.clear();
+        self.slots.insert(0, Some(Node::root()));
     }
     /// This will remove any empty slots from the end of the memory and will
     /// then reduce the internal vector to the minimum possible capacity.
@@ -94,7 +105,7 @@ impl<K, V> Slots<K, V> {
 
 
         // Remap all the keys.
-        for node in self.slots.iter_mut().filter(|f| f.is_some()).map(|f| f.as_mut().unwrap()) {
+        for node in self.slots.iter_mut().filter_map(<Option<Node<K, V>>>::as_mut) {
 
             for key in &mut node.sub_keys {
                 if remapper.contains_key(key) {
@@ -108,9 +119,6 @@ impl<K, V> Slots<K, V> {
     }
 
 
-    pub fn node_iter_mut(&mut self) -> NodeIterMut<'_, K, V> {
-        NodeIterMut { inner: self.slots.iter_mut(), position: 0 }
-    }
     
 }
 
@@ -127,38 +135,6 @@ impl<K, V> IndexMut<NodeIndex> for Slots<K, V> {
     }
 }
 
-pub(crate) struct NodeIterMut<'a, K, V> {
-    inner: std::slice::IterMut<'a, Option<Node<K, V>>>,
-    position: usize
-}
-
-impl<'a, K, V> Iterator for NodeIterMut<'a, K, V> {
-    type Item = (NodeIndex, &'a mut Node<K, V>);
-
-
-
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let mut current = None;
-        while current.is_none() {
-            let candidate = self.inner.next()?.as_mut(); // propagate initial value to check completion.
-            match candidate {
-                Some(inner) => {
-                    current = Some((NodeIndex {
-                        position: self.position
-                    }, inner));
-                    self.position += 1;
-                }
-                None => {
-                    self.position += 1;
-                    continue;
-                }
-            }
-            
-        }
-        current
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -172,18 +148,18 @@ mod tests {
         let mut list = Slots::<char, String>::with_capacity(0);
         let key = list.insert(Node::root());
         assert_eq!(list.free_list.len(), 0);
-        assert_eq!(list.slots.len(), 1);
+        assert_eq!(list.slots.len(), 2);
 
         list.remove(key).unwrap();
 
         // list should retain props
         assert_eq!(list.free_list.len(), 1);
-        assert_eq!(list.slots.len(), 1);
+        assert_eq!(list.slots.len(), 2);
 
 
         list.insert(Node::root());
         assert_eq!(list.free_list.len(), 0 );
-        assert_eq!(list.slots.len(), 1);
+        assert_eq!(list.slots.len(), 2);
         
     }
 

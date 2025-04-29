@@ -8,7 +8,7 @@ use std::{
     vec::{IntoIter, Vec},
 };
 
-use list::{NodeIndex, NodeIterMut, Slots};
+use list::{NodeIndex, Slots};
 use node::Node;
 
 mod iter;
@@ -69,7 +69,6 @@ impl<K, V> Default for Trie<K, V> {
     /// use rstrie::Trie;
     ///
     /// let mut trie = Trie::<char, ()>::default();
-    /// assert_eq!(trie.capacity(), 0);
     /// ```
     fn default() -> Self {
         Self::new()
@@ -108,7 +107,7 @@ impl WalkCtx {
     }
 }
 
-impl<'a, K, V> Iterator for WalkIter<'a, K, V> {
+impl<K, V> Iterator for WalkIter<'_, K, V> {
     type Item = (NodeIndex, Vec<NodeIndex>);
     fn next(&mut self) -> Option<Self::Item> {
         self.context.drive(self.trie)
@@ -118,17 +117,15 @@ impl<'a, K, V> Iterator for WalkIter<'a, K, V> {
 // The following are the internal 'developer' functions of the [Trie].
 impl<K, V> Trie<K, V> {
     fn collect_path_keys<'a, J>(&'a self, nodes: &[NodeIndex]) -> J
-    where 
-        J: FromIterator<&'a K>
+    where
+        J: FromIterator<&'a K>,
     {
         nodes
             .iter()
             .map(|f| self.node[*f].key())
-            .filter(|f| f.is_some())
-            .map(|f| f.as_ref().unwrap())
+            .filter_map(<Option<K>>::as_ref)
             .collect()
     }
-
 
     /// Performs an internal wlak of the [Trie] but
     /// receives the last node.
@@ -211,20 +208,6 @@ impl<K, V> Trie<K, V> {
             pending: vec![vec![root]],
         }
     }
-
-    // fn walk_path(&self, current: NodeIndex) {
-
-    //     println!("Walking from {current:?}");
-    //     if self.node[current].value().is_some() {
-    //         println!("TERMINAL");
-    //     }
-    //     for key in &self.node[current].sub_keys {
-    //         println!("({current:?}) --> ({key:?})");
-    //         self.walk_path(*key);
-    //     }
-
-    // }
-
     /// Performs an internal walk of the [Trie]. This is the most important function
     /// for the operation of the [Trie]. It takes in a visitor function that is called
     /// every time a nodes key is accessed, this allows for activities such as collecting
@@ -257,7 +240,7 @@ impl<K, V> Trie<K, V> {
             // Call on the current node.
             visitor_fn(*end);
 
-            if let Some(slot) = self.node[*end].get(&current, &self.node) {
+            if let Some(slot) = self.node[*end].get(current, &self.node) {
                 end = slot;
             } else {
                 return Err(WalkFailure {
@@ -329,38 +312,35 @@ impl<K, V> Trie<K, V> {
         I: IntoIterator<Item = K>,
         K: Ord,
     {
-        self.skip_trie_consistency()?;
-        Some(
+        
             self.internal_walk_with_index(&mut key.into_iter().peekable())
-                .ok()?,
-        )
+                .ok()
+        
     }
 
     /// Checks if a key is a prefix within a [Trie]. This
     /// may or may not be an exact math.
-    /// 
+    ///
     /// # Examples
     /// ```
     /// use rstrie::Trie;
-    /// 
+    ///
     /// let mut trie = Trie::<char, ()>::new();
     /// trie.insert("hello".chars(), ());
     /// trie.insert("hey".chars(), ());
     /// trie.insert("hero".chars(), ());
-    /// 
+    ///
     /// assert!(trie.is_prefix(['h', 'e']));
     /// assert!(trie.is_prefix(['h', 'e', 'r']));
     /// assert!(!trie.is_prefix(['h', 'e', 'r', 'y']));
     /// ```
     pub fn is_prefix<I>(&self, key: I) -> bool
-    where 
+    where
         I: IntoIterator<Item = K>,
-        K: Ord
+        K: Ord,
     {
-        self.skip_trie_consistency();
         self.internal_walk_with_index(&mut key.into_iter().peekable())
             .is_ok()
-
     }
     /// Gets all the completions of a key. This will
     /// traverse the tree to the point at which the key
@@ -463,8 +443,6 @@ impl<K, V> Trie<K, V> {
             }
         }
     }
-
-
 
     /// Returns an iterator over the values of the [Trie]
     /// data structure.
@@ -596,6 +574,91 @@ impl<K, V> Trie<K, V> {
             inner: iter::Iter::new(values),
         }
     }
+    /// Returns the longest prefix match.
+    ///
+    /// # Examples
+    /// ```
+    /// use rstrie::Trie;
+    ///
+    /// let mut trie = Trie::<char, usize>::new();
+    ///
+    /// trie.insert("he".chars(), 1);
+    /// trie.insert("hel".chars(), 2);
+    /// trie.insert("hello".chars(), 3);
+    ///
+    /// assert_eq!(trie.longest_prefix_entry("hello".chars()), Some(("hello".to_string(), &3)));
+    /// assert_eq!(trie.longest_prefix_entry("hellothere".chars()), Some(("hello".to_string(), &3)));
+    /// ```
+    pub fn longest_prefix_entry<I, J>(&self, key: I) -> Option<(J, &V)>
+    where
+        I: IntoIterator<Item = K>,
+        for<'b> J: FromIterator<&'b K>,
+        K: Ord
+    {
+        let mut last_productive = NodeIndex::ROOT;
+        let mut position = 0;
+        let mut last_productive_position = 0;
+        let mut collector = vec![];
+        self.find_longest_prefix_fn(key, |nk, k| {
+            if self.node[nk].value().is_some() {
+                last_productive = nk;
+                last_productive_position = position;
+            }
+            collector.push(k);
+            position += 1;
+        })?;
+        let value = self.node[last_productive].value().as_ref()?;
+        let key: J = collector[0..last_productive_position + 1].iter().copied().collect();
+        Some((key, value))
+    }
+    /// Returns the longest prefix match.
+    ///
+    /// # Examples
+    /// ```
+    /// use rstrie::Trie;
+    ///
+    /// let mut trie = Trie::<char, usize>::new();
+    ///
+    /// trie.insert("he".chars(), 1);
+    /// trie.insert("hel".chars(), 2);
+    /// trie.insert("hello".chars(), 3);
+    ///
+    /// assert_eq!(trie.longest_prefix("hello".chars()), Some(&3));
+    /// assert_eq!(trie.longest_prefix("hellothere".chars()), Some(&3));
+    /// ```
+    pub fn longest_prefix<I>(&self, key: I) -> Option<&V>
+    where
+        I: IntoIterator<Item = K>,
+        I::IntoIter: Debug,
+        K: Ord + Debug
+    {
+        let mut last_productive = NodeIndex::ROOT;
+        self.find_longest_prefix_fn(key, |nk, _| {
+            if self.node[nk].value().is_some() {
+                last_productive = nk;
+            }
+        })?;
+        self.node[last_productive].value().as_ref()
+    }
+
+    fn find_longest_prefix_fn<'a, I, F>(&'a self, key: I, mut functor: F) -> Option<NodeIndex>
+    where 
+        I: IntoIterator<Item = K>,
+        K: Ord,
+        F: FnMut(NodeIndex, &'a K)
+    {
+        match self.internal_walk_with_fn(key.into_iter().peekable().by_ref(), |nk | {
+            if let Some(inner) = self.node[nk].key() {
+                functor(nk, inner);
+            }
+        }) {
+            Ok(end) => Some(end),
+            Err(WalkFailure { root, .. }) => {
+                // The match was not an exact match (common case)
+                Some(root)
+            }
+        }
+    }
     /// Returns an iterator over the keys of the [Trie]
     /// data structure.
     ///
@@ -654,7 +717,7 @@ impl<K, V> Trie<K, V> {
         IntoEntryIter {
             inner: self.perform_walk(self.root),
             trie: self,
-            _type: PhantomData
+            _type: PhantomData,
         }
     }
     /// Returns an iterator over the entries of the [Trie]
@@ -683,9 +746,9 @@ impl<K, V> Trie<K, V> {
         EntryIterRef {
             inner: WalkIter {
                 context: self.perform_walk(self.root),
-                trie: self
+                trie: self,
             },
-            _type: PhantomData
+            _type: PhantomData,
         }
     }
 
@@ -714,7 +777,7 @@ impl<K, V> Trie<K, V> {
             inner: self.perform_walk(self.root),
             trie: self,
             // slot: None,.
-            _type: PhantomData
+            _type: PhantomData,
         }
     }
 
@@ -727,6 +790,7 @@ impl<K, V> Trie<K, V> {
     ///
     /// let mut tree = Trie::<char, &str>::new();
     /// tree.insert("hello".chars(), "world");
+    /// tree.insert("hellooo".chars(), "world2");
     /// assert_eq!(*tree.get("hello".chars()).unwrap(), "world");
     /// ```
     pub fn get<I>(&self, key: I) -> Option<&V>
@@ -750,16 +814,14 @@ impl<K, V> Trie<K, V> {
     {
         let mut array = [None::<NodeIndex>; N];
 
-        let mut i = 0;
-        for k in keys.into_iter() {
+
+        for (i, k) in keys.into_iter().enumerate() {
             let candidate = self.lookup_key(k);
 
             if candidate.is_some() && array.contains(&candidate) {
                 return Err(candidate.unwrap());
             }
             array[i] = candidate;
-
-            i += 1;
         }
 
         Ok(array)
@@ -945,7 +1007,6 @@ impl<K, V> Trie<K, V> {
         for<'a> J: FromIterator<&'a K>,
         K: Ord,
     {
-        self.skip_trie_consistency()?;
         let (key, value) = self
             .internal_walk_collect_key(&mut key.into_iter().peekable())
             .ok()?;
@@ -975,7 +1036,6 @@ impl<K, V> Trie<K, V> {
         for<'a> J: FromIterator<&'a K>,
         K: Ord,
     {
-        self.skip_trie_consistency()?;
         let (key, value) = self
             .internal_walk_collect_key(&mut key.into_iter().peekable())
             .ok()?;
@@ -1002,8 +1062,6 @@ impl<K, V> Trie<K, V> {
         for<'a> J: FromIterator<&'a K>,
         K: Ord,
     {
-        self.skip_trie_consistency()?;
-
         let mut path = vec![];
         let trajectory = self
             .internal_walk_with_path_fn(key.into_iter().peekable().by_ref(), |nk| {
@@ -1045,7 +1103,6 @@ impl<K, V> Trie<K, V> {
         I: IntoIterator<Item = K>,
         K: Ord + Debug,
     {
-        self.skip_trie_consistency()?;
         let trajectory = self
             .internal_walk_with_path(master.into_iter().peekable().by_ref())
             .ok()?;
@@ -1121,30 +1178,8 @@ impl<K, V> Trie<K, V> {
     {
         self.node
             .iter()
-            .find(|(_, v)| v.value().is_some() && v.value().as_ref().unwrap() == value)
-            .is_some()
-    }
-
-    // /// Returns the values.
-    // ///
-    // pub fn values(&self) ->  {
-
-    // }
-
-    /// If we do not have a root then we should just return.
-    fn skip_trie_consistency(&self) -> Option<()> {
-        if self.node.slots.is_empty() {
-            None
-        } else {
-            Some(())
-        }
-    }
-
-    fn make_trie_consistent(&mut self) {
-        if self.node.slots.is_empty() {
-            // No nodes.
-            self.node.slots.push(Some(Node::root()));
-        }
+            .any(|(_, v)| v.value().is_some() && v.value().as_ref().unwrap() == value)
+          
     }
 
     /// Puts a new record in the [Trie], returning the old value
@@ -1168,8 +1203,6 @@ impl<K, V> Trie<K, V> {
         K: Debug,
         K: Ord,
     {
-        self.make_trie_consistent();
-
         self.size += 1;
 
         match self.internal_walk_with_index(master.into_iter().peekable().by_ref()) {
@@ -1360,9 +1393,9 @@ where
     /// assert_eq!(values[1].0, "hey");
     /// ```
     fn next(&mut self) -> Option<Self::Item> {
-        let (current, path) = self.inner.drive(&self.trie)?;
+        let (current, path) = self.inner.drive(self.trie)?;
 
-        let key = assemble_completion(&self.trie, &self.beginning, path);
+        let key = assemble_completion(self.trie, &self.beginning, path);
 
         Some((key, self.trie.node[current].value().as_ref().unwrap()))
     }
@@ -1394,7 +1427,7 @@ where
     /// assert_eq!(values[1].0, "y");
     /// ```
     fn next(&mut self) -> Option<Self::Item> {
-        let (current, path) = self.inner.drive(&self.trie)?;
+        let (current, path) = self.inner.drive(self.trie)?;
 
         let key = path
             .iter()
@@ -1420,8 +1453,7 @@ where
     let tail_end = walked
         .into_iter()
         .map(|nk| trie.node[nk].key())
-        .filter(|f| f.is_some())
-        .map(|f| f.as_ref().unwrap());
+        .filter_map(<Option<K>>::as_ref);
 
     let actual_key = beginning
         .iter()
@@ -1429,7 +1461,7 @@ where
         .rev()
         .skip(1)
         .rev()
-        .map(|k| *k)
+        .copied()
         .chain(tail_end)
         .collect::<J>();
 
@@ -1474,16 +1506,15 @@ pub struct EntryIterMut<'a, K, V, J> {
 pub struct IntoEntryIter<K, V, J> {
     trie: Trie<K, V>,
     inner: WalkCtx,
-    _type: PhantomData<J>
+    _type: PhantomData<J>,
 }
-
 
 /// An iterator created by consuming the [Trie].
 ///
 /// Contains all the entries of the [Trie].
 pub struct EntryIterRef<'a, K, V, J> {
     inner: WalkIter<'a, K, V>,
-    _type: PhantomData<J>
+    _type: PhantomData<J>,
 }
 
 /// An iterator created by consuming the [Trie].
@@ -1513,15 +1544,14 @@ pub struct ValueIterMut<'a, K, V> {
 }
 
 // impl<'a, K, V, J> Iterator for EntryIter<'a, K, V, J>
-// where 
+// where
 //     J: FromIterator<&'a K>
 // {
 //     type Item = (J, &'a V);
 
 impl<K, V, J> Iterator for IntoEntryIter<K, V, J>
-where 
-     for<'b> J: FromIterator<&'b K>,
-     
+where
+    for<'b> J: FromIterator<&'b K>,
 {
     type Item = (J, V);
 
@@ -1541,23 +1571,17 @@ where
     /// assert!(key_iter.next().is_none());
     /// ```
     fn next(&mut self) -> Option<Self::Item> {
-        let (current, path) =  { self.inner.drive(&self.trie)? };
+        let (current, path) = { self.inner.drive(&self.trie)? };
 
-        
         let calced = self.trie.collect_path_keys::<J>(&path);
-        
 
-
-       
-       Some((calced, self.trie.node[current].value_mut().take().unwrap()))
+        Some((calced, self.trie.node[current].value_mut().take().unwrap()))
     }
 }
 
-
 impl<'a, K: Clone, V, J> Iterator for EntryIterMut<'a, K, V, J>
-where 
-     for<'b> J: FromIterator<&'b K>,
-     
+where
+    for<'b> J: FromIterator<&'b K>,
 {
     type Item = (J, ValueSlot<'a, K, V>);
 
@@ -1588,42 +1612,34 @@ where
     /// assert!(key_iter.next().is_none());
     /// ```
     fn next(&mut self) -> Option<Self::Item> {
-        let (current, path) =  { self.inner.drive(&self.trie)? };
+        let (current, path) = { self.inner.drive(self.trie)? };
 
-        
         let calced = self.trie.collect_path_keys::<J>(&path);
-        
-
 
         // SAFETY: The borrow checker does not know that subsequent calls return distinct
         // nodes, and thus the aliasing rules are upheld and we only have a single mutable reference at a time.
-        let candidate = unsafe { &mut *(&mut self.trie.node[current] as *mut Node<K, V>)  };
+        let candidate = unsafe { &mut *(&mut self.trie.node[current] as *mut Node<K, V>) };
 
-
-   
-        Some((calced, ValueSlot {
-            node: candidate
-        }))
+        Some((calced, ValueSlot { node: candidate }))
     }
 }
 
 pub struct ValueSlot<'a, K, V> {
-    node: &'a mut Node<K, V>
+    node: &'a mut Node<K, V>,
 }
 
-impl<'a, K, V> Deref for ValueSlot<'a, K, V> {
+impl<K, V> Deref for ValueSlot<'_, K, V> {
     type Target = V;
     fn deref(&self) -> &Self::Target {
         self.node.value().as_ref().unwrap()
     }
 }
 
-impl<'a, K, V> DerefMut for ValueSlot<'a, K, V> {
+impl<K, V> DerefMut for ValueSlot<'_, K, V> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.node.value_mut_unchecked()
     }
 }
-
 
 impl<K, V> PartialEq for Trie<K, V>
 where
@@ -1635,8 +1651,7 @@ where
             .node
             .slots
             .iter()
-            .filter(|f| f.is_some())
-            .map(|f| f.as_ref().unwrap())
+            .filter_map(|f| f.as_ref())
         {
             if !other
                 .node
@@ -1679,8 +1694,8 @@ where
 }
 
 impl<'a, K, V, J> Iterator for EntryIterRef<'a, K, V, J>
-where 
-    J: FromIterator<&'a K>
+where
+    J: FromIterator<&'a K>,
 {
     type Item = (J, &'a V);
 
@@ -1695,7 +1710,7 @@ where
     ///
     /// let mut key_iter = tree.into_entries::<String>();
     ///
-    /// 
+    ///
     /// assert_eq!(key_iter.next().unwrap(), ("bye".to_string(), 3));
     /// assert_eq!(key_iter.next().unwrap(), ("hello".to_string(), 4));
     /// assert!(key_iter.next().is_none());
@@ -1703,7 +1718,10 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         let (curr, path) = self.inner.next()?;
 
-        Some((self.inner.trie.collect_path_keys(&path), self.inner.trie.node[curr].value().as_ref().unwrap()))
+        Some((
+            self.inner.trie.collect_path_keys(&path),
+            self.inner.trie.node[curr].value().as_ref().unwrap(),
+        ))
     }
 }
 
@@ -1968,6 +1986,8 @@ impl<K, V, J> Iterator for Drain<'_, K, V, J> {
 #[cfg(test)]
 mod tests {
 
+    use std::net::Ipv4Addr;
+
     use super::Trie;
 
     #[test]
@@ -1982,29 +2002,24 @@ mod tests {
 
     #[test]
     pub fn test_entry_mut() {
+        let mut tree = Trie::<char, usize>::from([("hello".chars(), 4), ("bye".chars(), 3)]);
 
-        let mut tree = Trie::<char, usize>::from([
-            ("hello".chars(), 4),
-            ("bye".chars(), 3)
-        ]);
-        
         let mut key_iter = tree.entries_mut::<String>();
-        
+
         assert_eq!(*key_iter.next().unwrap().1, 3);
         assert_eq!(*key_iter.next().unwrap().1, 4);
-        
+
         assert!(key_iter.next().is_none());
-        
+
         let mut key_iter = tree.entries_mut::<String>();
-        
+
         *key_iter.next().unwrap().1 = 5;
-        
+
         let mut key_iter = tree.entries_mut::<String>();
-        
+
         assert_eq!(*key_iter.next().unwrap().1, 5);
         assert_eq!(*key_iter.next().unwrap().1, 4);
         assert!(key_iter.next().is_none());
-        
     }
 
     #[test]
@@ -2079,29 +2094,13 @@ mod tests {
         tree.insert(['t', 'e', 's', 't'], "sample_1");
         tree.insert("tea".chars(), "Sample_2");
 
-        // for path in tree.complete_walk() {
-        //     println!("Yielded, {:?}", path);
-        // }
-        // println!("TREE: {:?}", tree);
-
-        // let mut tracker = vec![];
-
-        // println!(
-        //     "Traversal: {:?}",
-        //     tree.internal_walk_with_fn(['t', 'e', 'a'].into_iter().peekable().by_ref(), |nk| {
-        //         println!("Progressing @ {nk:?} {:?}", tree.node[nk]);
-        //         println!("Value @ {nk:?} {:?}", tree.node[nk].get(&'t', &tree.node));
-        //         tree.key_collect(nk, &mut tracker);
-        //     })
-        // );
-
-        // panic!("Hello {:?}", 3);
     }
 
     #[test]
     pub fn basic_trie_insert() {
         let mut tree: Trie<char, &str> = Trie::new();
         tree.insert("test".chars(), "sample_1");
+        tree.insert("testttt".chars(), "sample_2");
         assert!(tree.contains_key("test".chars()));
         assert_eq!(*tree.get("test".chars()).unwrap(), "sample_1");
     }
@@ -2230,5 +2229,65 @@ mod tests {
 
             Ok(())
         });
+    }
+
+    #[test]
+    pub fn test_longest_prefix() {
+        let mut trie = Trie::<char, usize>::new();
+
+        trie.insert("he".chars(), 1);
+        trie.insert("hel".chars(), 2);
+        trie.insert("hello".chars(), 3);
+
+        assert_eq!(
+            trie.longest_prefix_entry("hello".chars()),
+            Some(("hello".to_string(), &3))
+        );
+        assert_eq!(
+            trie.longest_prefix_entry("hellothere".chars()),
+            Some(("hello".to_string(), &3))
+        );
+    }
+
+    #[test]
+    pub fn test_longest_prefix_routing_table() {
+        let mut trie = Trie::<bool, MatchRule>::new();
+
+        fn convert_to_bits(val: u8) -> [bool; 8] {
+            let mut result = [false; 8];
+            for i in 0..8 {
+                result[7 - i] = (val & (1 << i)) != 0; 
+                // println!("Value: {:08b}", );
+
+            }
+            result
+        }
+
+        #[derive(PartialEq, Eq, Debug)]
+        enum MatchRule {
+            Forward(u8),
+            Delete
+        }
+
+
+
+        // All addresses that start with 101 get forwarded to 3.
+        trie.insert([true, false, true], MatchRule::Forward(3));
+
+        // All addresses that start with 1010 get forwarded to 4;
+        trie.insert([true, false, true, false], MatchRule::Forward(4));
+        
+        // All addresses that start with 1010001 get deleted
+        trie.insert([true, false, true, false, false, false, true], MatchRule::Delete);
+
+
+
+        assert_eq!(trie.longest_prefix(convert_to_bits(0b10100000u8)), Some(&MatchRule::Forward(4)));
+        assert_eq!(trie.longest_prefix(convert_to_bits(0b10110000u8)), Some(&MatchRule::Forward(3)));
+        assert_eq!(trie.longest_prefix(convert_to_bits(0b10100010u8)), Some(&MatchRule::Delete));
+
+
+
+
     }
 }
