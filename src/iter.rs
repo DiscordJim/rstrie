@@ -1,4 +1,3 @@
-use std::str::Chars;
 
 pub(crate) struct Iter<V> {
     values: Vec<Option<V>>,

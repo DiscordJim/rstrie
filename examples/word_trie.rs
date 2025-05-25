@@ -2,6 +2,8 @@ use std::borrow::Borrow;
 
 use rstrie::{CompletionIter, Trie};
 
+/// This will be our [Word] object which represents a word
+/// from a sentence.
 #[derive(Clone, Hash, PartialEq, Eq, Debug, PartialOrd, Ord)]
 pub struct Word(String);
 
@@ -18,6 +20,7 @@ impl Word {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct Sentence(String);
 
@@ -33,7 +36,24 @@ where
     }
 }
 
+fn find_completion(trie: &Trie<Word, ()>, search_str: &str) {
+    println!("Finding completions for {search_str}...");
+    // Find the completions for this phrase.
+    let completions: CompletionIter<'_, Word, (), Sentence> = trie.completions::<_, Word, Sentence>(Word::wordify(search_str));
+
+    println!("Completions found:");
+    for (completion, _) in completions {
+        println!("- {}", completion.0)
+    }
+
+
+}
+
+
+
 pub fn main() {
+
+    println!("running simple trie...");
     let mut tree = Trie::<Word, ()>::new();
     tree.insert(Word::wordify("I like cats."), ());
     tree.insert(Word::wordify("I like dogs."), ());
@@ -43,12 +63,6 @@ pub fn main() {
     tree.insert(Word::wordify("I like cats sometimes."), ());
     tree.insert(Word::wordify("I like cats somedays."), ());
 
-    println!("TREE:\n{:?}", tree);
-
-    let completions: CompletionIter<'_, Word, (), Sentence> = tree.completions(Word::wordify("I like"));
-    println!("Competions:\n{:?}", completions);
-
-    for comp in completions {
-        println!("Comp: {:?}", comp);
-    }
+    find_completion(&tree, "I like");
+    find_completion(&tree, "I like cats");
 }

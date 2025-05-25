@@ -9,17 +9,11 @@ pub enum Value {
 }
 
 pub fn main() {
-
-
-    // println!("HELLO: {:?}", size_of::<())
-
     let mut tree = Trie::<char, Value>::new();
     tree.insert("hello".chars(), Value::A);
     tree.insert("world".chars(), Value::B);
     tree.insert("cool".chars(), Value::C);
     tree.insert("hey".chars(), Value::D);
 
-
     println!("Hello: {:?}", tree.get("hello".chars()).unwrap());
-
 }
