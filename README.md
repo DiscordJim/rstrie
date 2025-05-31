@@ -1,5 +1,7 @@
 # RsTrie
-[![GitHub Actions Status](https://github.com/laysakura/trie-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/laysakura/trie-rs/actions)
+[![GitHub Actions Status](https://github.com/DiscordJim/rstrie/actions/workflows/rust.yml/badge.svg)](https://github.com/DiscordJim/rstrie/actions)
+[![Crates.io Version](https://img.shields.io/crates/v/trie-rs.svg)](https://crates.io/crates/rstrie)
+[![Crates.io Downloads](https://img.shields.io/crates/d/trie-rs.svg)](https://crates.io/crates/rstrie)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/DiscordJim/rstrie/blob/main/LICENSE)
 
 A generalized Trie implementation for Rust. The implementation supports generic tries, the only requirement is that the key 'fragments,' or the pieces that compose the key, be able to iterated from a key and collected into a key. The library has no external dependencies when not in development mode. In development mode there are several dependencies for benchmarking and the like.
