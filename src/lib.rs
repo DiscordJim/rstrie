@@ -48,13 +48,33 @@ mod list;
 /// ```
 pub type StrTrie<V> = Trie<char, V>;
 
+/// A [Trie] is a data structure that is commonly used to
+/// store and retrieve strings. Each node stores a character of the
+/// string, which results in a very memory efficient storage of strings.
+/// This crate takes a slightly different approach, allowing for the building
+/// of Tries from arbitrary types as long as they can satisfy certain properties.
+/// 
+/// In our case, the key must implement the [Ord] type. This is because the nodes
+/// store a list of keys that are sorted, and binary search is used for efficient lookup
+/// of the storage index. 
+/// 
+/// # Example
+/// ```
+/// use rstrie::Trie;
+/// 
+/// let mut trie: Trie<char, usize> = Trie::new();
+/// trie.insert("hello".chars(), 4);
+/// trie.insert("hey".chars(), 5);
+/// 
+/// assert_eq!(trie.get("hello".chars()), Some(&4));
+/// assert_eq!(trie.get("hey".chars()), Some(&5));
+/// ```
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-/// A data strucur
 pub struct Trie<K, V> {
     /// The node pool, this is where the internal nodes are actually store. This
     /// improves cache locality and ease of access while limiting weird lifetime errors.

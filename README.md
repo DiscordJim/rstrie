@@ -21,7 +21,7 @@ trie.insert("hello".chars(), 4);
 trie.insert("hey".chars(), 5);
 
 assert_eq!(trie.get("hello".chars()), Some(&4));
-assert_eq!(trie.get("hey".chars(), Some(&5)));
+assert_eq!(trie.get("hey".chars()), Some(&5));
 ```
 
 ## Features
