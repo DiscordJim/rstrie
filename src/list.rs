@@ -75,7 +75,9 @@ impl<K, V> Node<K, V> {
         let result = self
             .sub_keys
             .binary_search_by(|k| {
-                let sub = buffer[*k].key().as_ref().unwrap();
+                // UNWRAP: This unwrap is okay, because no node can point to the root node.
+                // The root node is the only node that has a null key.
+                let sub = buffer[*k].key().as_ref().expect("Node key was null.");
                 functor(sub)
             })
             .ok()?;
@@ -86,7 +88,9 @@ impl<K, V> Node<K, V> {
     /// Gets the inner value of the node regardless
     /// of if it is [Option::None] or not.
     pub fn value_mut_unchecked(&mut self) -> &mut V {
-        self.value_mut().as_mut().unwrap()
+        self.value_mut()
+            .as_mut()
+            .expect("Tried to get the value as some value but was None.")
     }
     /// Gets an iterator of all the subkeys as a form
     /// of [NodeIndex] iterators.
@@ -107,9 +111,14 @@ impl<K, V> Node<K, V> {
     where
         K: Ord,
     {
-        let key = buffer[reference].key().as_ref().unwrap();
-        self.sub_keys
-            .binary_search_by(|node| buffer[*node].key.as_ref().unwrap().cmp(key))
+        let key = buffer[reference]
+            .key()
+            .as_ref()
+            .expect("Reference node was the root node.");
+        self.sub_keys.binary_search_by(|node|
+                // UNWRAP: This unwrap is okay, because no node can point to the root node.
+                // The root node is the only node that has a null key.
+                buffer[*node].key.as_ref().expect("Node key was null").cmp(key))
     }
     /// Returns the length of the subkey array, or in other words,
     /// how many subkeys the specific node has.
@@ -172,7 +181,7 @@ impl<K, V> Node<K, V> {
 /// The array that holds all the underlying node data. It works
 /// by holding a freelist for filling tombstone slots, and by maintaining
 /// a simple vector. Defragmentation happens when called manually.
-/// 
+///
 /// The slots will always have a root. In practice, this means that it will
 /// never error because the root was indexed and it did not exist. Great
 /// care is put into maintaining the root within the list.
@@ -233,7 +242,7 @@ impl<K, V> Slots<K, V> {
     pub fn with_capacity(cap: usize) -> Self {
         let mut new = Self {
             slots: Vec::with_capacity(cap),
-            free_list: vec![]
+            free_list: vec![],
         };
         new.slots.insert(0, Some(Node::root()));
         new
@@ -249,7 +258,7 @@ impl<K, V> Slots<K, V> {
     /// Iterates over the optional slots mutably.
     pub fn slot_iter_mut(&mut self) -> SlotsIterMut<'_, K, V> {
         SlotsIterMut {
-            inner: self.slots.iter_mut()
+            inner: self.slots.iter_mut(),
         }
     }
     /// Reserves a certain quantity in the underlying [Vec] that makes
@@ -260,7 +269,7 @@ impl<K, V> Slots<K, V> {
     /// Drains the slots. This is just a thin wrapper around the [Vec::drain]
     /// method. Returns them as optional slots. Used as a helper method to drain
     /// the actual tree.
-    /// 
+    ///
     /// This is a very heavy method as it shifts all the elements over to the right.
     pub fn drain_slots(&mut self) -> Drain<'_, Option<Node<K, V>>> {
         self.slots.insert(0, Some(Node::root()));
@@ -283,7 +292,10 @@ impl<K, V> Slots<K, V> {
     /// the new [NodeIndex].
     pub fn insert(&mut self, item: Node<K, V>) -> NodeIndex {
         if !self.free_list.is_empty() {
-            let avail = self.free_list.pop().unwrap();
+            let avail = self
+                .free_list
+                .pop()
+                .expect("List was not empty but could not pop.");
             self.slots[avail] = Some(item);
             NodeIndex(avail as u64)
         } else {
@@ -315,8 +327,7 @@ impl<K, V> Slots<K, V> {
         self.slots
             .iter()
             .enumerate()
-            .filter(|(_, f)| f.is_some())
-            .map(|(i, key)| (NodeIndex(i as u64), key.as_ref().unwrap()))
+            .filter_map(|(i, f)| Some((NodeIndex(i as u64), f.as_ref()?)))
     }
     pub fn insert_subkey(&mut self, source: NodeIndex, value: NodeIndex) -> Option<NodeIndex>
     where
@@ -383,19 +394,18 @@ impl<K, V> Slots<K, V> {
             .filter_map(<Option<Node<K, V>>>::as_mut)
         {
             for key in &mut node.sub_keys {
-                if remapper.contains_key(key) {
-                    *key = *remapper.get(key).unwrap();
+                if let Some(new_k) = remapper.get(key) {
+                    *key = *new_k;
                 }
             }
         }
     }
 }
 
-
 /// Returns an iterator of the underlying vector that skips
 /// over the entries that are tombstones.
 pub(crate) struct SlotsIterMut<'a, K, V> {
-    inner: core::slice::IterMut<'a, Option<Node<K, V>>>
+    inner: core::slice::IterMut<'a, Option<Node<K, V>>>,
 }
 
 impl<'a, K, V> Iterator for SlotsIterMut<'a, K, V> {
@@ -415,13 +425,17 @@ impl<'a, K, V> Iterator for SlotsIterMut<'a, K, V> {
 impl<K, V> Index<NodeIndex> for Slots<K, V> {
     type Output = Node<K, V>;
     fn index(&self, index: NodeIndex) -> &Self::Output {
-        self.slots[index.position()].as_ref().unwrap()
+        self.slots[index.position()]
+            .as_ref()
+            .expect("Could not find node at requested index.")
     }
 }
 
 impl<K, V> IndexMut<NodeIndex> for Slots<K, V> {
     fn index_mut(&mut self, index: NodeIndex) -> &mut Self::Output {
-        self.slots[index.position()].as_mut().unwrap()
+        self.slots[index.position()]
+            .as_mut()
+            .expect("Could not find node at requested index.")
     }
 }
 
@@ -429,7 +443,6 @@ impl<K, V> IndexMut<NodeIndex> for Slots<K, V> {
 pub struct DisjointMutIndices<'a, K, V, const N: usize>([&'a mut Option<Node<K, V>>; N]);
 
 impl<'a, K, V, const N: usize> DisjointMutIndices<'a, K, V, N> {
-
     /// Returns the length of the disjoint mutable indices.
     pub fn len(&self) -> usize {
         self.0.len()
@@ -439,13 +452,18 @@ impl<'a, K, V, const N: usize> DisjointMutIndices<'a, K, V, N> {
 impl<'a, K, V, const N: usize> Index<usize> for DisjointMutIndices<'a, K, V, N> {
     type Output = Option<V>;
     fn index(&self, index: usize) -> &Self::Output {
-        self.0[index].as_ref().unwrap().value()
+        self.0[index]
+            .as_ref()
+            .expect("Could not find node at requested index.")
+            .value()
     }
 }
 
 impl<'a, K, V, const N: usize> IndexMut<usize> for DisjointMutIndices<'a, K, V, N> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        let inner = self.0[index].as_mut().unwrap();
+        let inner = self.0[index]
+            .as_mut()
+            .expect("Could not find node at requested index.");
         &mut inner.value
     }
 }
@@ -478,29 +496,20 @@ mod tests {
     pub fn remove_root() {
         let mut list = Slots::<char, String>::with_capacity(0);
         assert!(list.remove(super::NodeIndex::ROOT).unwrap().key().is_none());
-
-        
     }
 
     #[test]
     pub fn root_exists_post_drain() {
         let mut list = Slots::<char, usize>::with_capacity(1);
         list.insert(Node::keyed('a'));
-        for _ in list.drain_slots() {
-
-        }
+        for _ in list.drain_slots() {}
         assert!(list[NodeIndex::ROOT].key().is_none());
     }
 
     fn check_map_integrity_defragmented(map: &Slots<char, String>) {
         // Condition A.1: All keys are valid.
         // Condition A.2: All the parent references are satisfied.
-        for slot in map
-            .slots
-            .iter()
-            .filter(|f| f.is_some())
-            .map(|f| f.as_ref().unwrap())
-        {
+        for slot in map.slots.iter().filter_map(Option::as_ref) {
             for key in slot.subkeys() {
                 if map.slots[key.position()].is_none() {
                     panic!("Key reference invalid!");

@@ -21,14 +21,7 @@
 //! ```
 
 use std::{
-    borrow::Borrow,
-    cmp::Ordering,
-    fmt::Debug,
-    iter::Peekable,
-    marker::PhantomData,
-    ops::{Deref, DerefMut, Index, IndexMut},
-    slice::GetDisjointMutError,
-    vec::IntoIter,
+    borrow::Borrow, cmp::Ordering, error::Error, fmt::Debug, iter::Peekable, marker::PhantomData, ops::{Deref, DerefMut, Index, IndexMut}, slice::GetDisjointMutError, vec::IntoIter
 };
 
 use list::{DisjointMutIndices, Node, NodeIndex, Slots};
@@ -147,7 +140,7 @@ impl WalkCtx {
     /// Drives this forward, this is similar to the
     pub fn drive<K, V>(&mut self, trie: &Trie<K, V>) -> Option<(NodeIndex, Vec<NodeIndex>)> {
         while let Some(pending) = self.pending.pop() {
-            let current = pending.last().unwrap();
+            let current = pending.last().expect("Pending list was empty.");
 
             for &child in trie.node[*current].subkeys().rev() {
                 // Create a new path.
@@ -474,7 +467,7 @@ impl<K, V> Trie<K, V> {
         for (_, node_index) in full_walk {
             let collected = self.collect_path_keys::<Vec<_>>(&node_index);
             let score = distance(&collected);
-            if best_score.is_none() || *best_score.as_ref().unwrap() < score {
+            if best_score.is_none() || *best_score.as_ref().expect("Best score was none despite us asserting it was not.") < score {
                 best_score = Some(score);
                 best_candidate = Some(collected);
             }
@@ -952,7 +945,7 @@ impl<K, V> Trie<K, V> {
     fn try_get_key_map<I, B, const N: usize>(
         &mut self,
         keys: [I; N],
-    ) -> Result<[NodeIndex; N], NodeIndex>
+    ) -> Result<[NodeIndex; N], TryGetKeyMapError>
     where
         I: IntoIterator<Item = B>,
         K: Ord,
@@ -965,10 +958,10 @@ impl<K, V> Trie<K, V> {
 
             if let Some(candidate) = candidate {
                 if array.contains(&candidate) {
-                    return Err(candidate);
+                    return Err(TryGetKeyMapError::Duplicate(candidate.position()));
                 }
             }
-            array[i] = candidate.unwrap();
+            array[i] = candidate.ok_or(TryGetKeyMapError::KeyDoesNotExist)?;
         }
 
         Ok(array)
@@ -1133,7 +1126,9 @@ impl<K, V> Trie<K, V> {
         let (key, value) = self
             .internal_walk_collect_key(&mut key.into_iter().peekable())
             .ok()?;
-        Some((key, self.node[value].value().as_ref().unwrap()))
+        Some((key, self.node[value].value().as_ref()
+            .expect("Walk terminated on a node that did not have a value, i.e., was not a proper key termination.")
+        ))
     }
 
     /// Returns the key-value pair corresponding to the supplied key.
@@ -1163,7 +1158,7 @@ impl<K, V> Trie<K, V> {
         let (key, value) = self
             .internal_walk_collect_key(&mut key.into_iter().peekable())
             .ok()?;
-        Some((key, self.node[value].value_mut().as_mut().unwrap()))
+        Some((key, self.node[value].value_mut().as_mut().expect("Iteration erroneously terminated on non-leaf node.")))
     }
 
     /// Removes a key from the [Trie], returning the computed key and value
@@ -1328,7 +1323,7 @@ impl<K, V> Trie<K, V> {
     {
         self.node
             .iter()
-            .any(|(_, v)| v.value().is_some() && v.value().as_ref().unwrap() == value)
+            .any(|(_, v)| v.value().as_ref().is_some_and(|inner| inner == value))
     }
 
     /// Puts a new record in the [Trie], returning the old value
@@ -1367,13 +1362,14 @@ impl<K, V> Trie<K, V> {
                 mut root,
                 remainder,
             }) => {
-                let mut nk = Some(root);
+                
+                let mut nk = root;
                 for item in remainder {
-                    nk = Some(self.node.insert(Node::keyed(item)));
-                    self.node.insert_subkey(root, nk.unwrap());
-                    root = nk.unwrap();
+                    nk = self.node.insert(Node::keyed(item));
+                    self.node.insert_subkey(root, nk);
+                    root = nk;
                 }
-                *self.node[nk.unwrap()].value_mut() = Some(value);
+                *self.node[nk].value_mut() = Some(value);
                 self.size += 1;
                 None
             }
@@ -1453,7 +1449,8 @@ where
     ///
     /// ```
     fn index(&self, index: I) -> &Self::Output {
-        self.get(index).as_ref().unwrap()
+        self.get(index).as_ref()
+            .expect("Could not find index in Trie!")
     }
 }
 
@@ -1488,7 +1485,7 @@ where
 
         let key = assemble_completion(self.trie, &self.beginning, path);
 
-        Some((key, self.trie.node[current].value().as_ref().unwrap()))
+        Some((key, self.trie.node[current].value().as_ref().expect("Iteration erroneously terminated on non-leaf node.")))
     }
 }
 
@@ -1523,12 +1520,11 @@ where
         let key = path
             .iter()
             .map(|f| self.trie.node[*f].key())
-            .filter(|f| f.is_some())
-            .skip(1)
-            .map(|f| f.as_ref().unwrap());
+            .filter_map(|f| f.as_ref())
+            .skip(1);
         Some((
             key.collect(),
-            self.trie.node[current].value().as_ref().unwrap(),
+            self.trie.node[current].value().as_ref().expect("Walk terminated on a non-leaf node. This means that the internal structure of the Trie is corrupted or there is an error in the WalkCtx implementation."),
         ))
     }
 }
@@ -2088,7 +2084,7 @@ where
 
         let calced = self.trie.collect_path_keys::<J>(&path);
 
-        Some((calced, self.trie.node[current].value_mut().take().unwrap()))
+        Some((calced, self.trie.node[current].value_mut().take().expect("Iteration terminated erroneously on a non-leaf node.")))
     }
 }
 
@@ -2144,7 +2140,7 @@ pub struct ValueSlot<'a, K, V> {
 impl<K, V> Deref for ValueSlot<'_, K, V> {
     type Target = V;
     fn deref(&self) -> &Self::Target {
-        self.node.value().as_ref().unwrap()
+        self.node.value().as_ref().expect("Tried to read node value but was None.")
     }
 }
 
@@ -2192,7 +2188,8 @@ where
 
         Some((
             self.inner.trie.collect_path_keys(&path),
-            self.inner.trie.node[curr].value().as_ref().unwrap(),
+            self.inner.trie.node[curr].value().as_ref()
+                .expect("Walk terminated on non-leaf node.")
         ))
     }
 }
@@ -2446,7 +2443,37 @@ impl<K, V, J> Iterator for Drain<'_, K, V, J> {
                 current = node.into_value();
             }
         }
-        Some((self.key_iter.next().unwrap(), current.unwrap()))
+        Some((self.key_iter.next()?, current.expect("The current iterating node was supposedly filled, but turned out to be None.")))
+    }
+}
+
+pub enum TryGetKeyMapError {
+    KeyDoesNotExist,
+    Duplicate(usize)
+}
+
+impl std::fmt::Display for TryGetKeyMapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::KeyDoesNotExist => f.write_str("KeyDoesNotExist"),
+            Self::Duplicate(i) => write!(f, "Duplicate({i})")
+        }
+    }
+}
+
+impl std::fmt::Debug for TryGetKeyMapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        <Self as std::fmt::Display>::fmt(self, f)
+    }
+}
+
+impl Error for TryGetKeyMapError {
+
+    fn description(&self) -> &str {
+        match self {
+            Self::Duplicate(_) => "There was a duplicate key, they were not disjoint.",
+            Self::KeyDoesNotExist => "Failed to get one of the keys from the slotmap"
+        }
     }
 }
 
@@ -2482,7 +2509,11 @@ mod arbitrary_trie {
             let thres = random_norm_float(u)?;
             for i in 0..buffer.len() {
                 if random_norm_float(u)? < thres {
-                    let key = buffer.get_mut(i).unwrap().take().unwrap();
+                    let key = buffer.get_mut(i)
+                        .ok_or(arbitrary::Error::IncorrectFormat)?
+                        .take()
+                        .ok_or(arbitrary::Error::IncorrectFormat)?;
+
                     trie.remove(key.into_iter());
                 }
             }
