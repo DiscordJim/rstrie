@@ -12,7 +12,15 @@ assert_eq!(trie.get("hello".chars()), Some(&4));
 assert_eq!(trie.get("hey".chars(), Some(&5)));
 ```
 
-ADD LOCKING TREES?
+# Features
+- A `Trie` that works with any data type.
+- Supports the same interfaces as `HashMap`
+- Longest prefix search
+- Completions search
+- Specialized methods for working with strings.
+- No dependencies
+- Full serialization/deseralization support (`serde`, `rkyv`)
+
 
 ## Fuzzing
 ```bash
