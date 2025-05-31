@@ -5,7 +5,7 @@ A generalized Trie implementation for Rust. The implementation supports generic 
 Add the following line to your dependencies,
 ```toml
 [dependencies]
-rstrie = 0.5.0
+rstrie = "0.5.0"
 ```
 The following code demonstrates a simple `Trie`:
 ```rust
@@ -34,19 +34,12 @@ assert_eq!(trie.get("hey".chars(), Some(&5)));
 $ cargo install cargo-fuzz
 ```
 
-## TODO
-- ARBITRARY
-- SERDE
-- RKYV
-- Add size tests where we add duplicate keys, etc.
-
 ## Examples
 There are several examples contained within the examples folder.
 - `examples/basic.rs` has a basic String trie.
 - `examples/word_trie.rs` features a word trie that composes into sentences.
 - `examples/bitrouting.rs` features an IP routing table.
-
-
+- `examples/1984_trie.rs` features a trie that ingests the contents of George Orwell's 1984.
 
 ## Benchmarks
 To run the benchmarks, you simply run the following command:
