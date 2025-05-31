@@ -1,6 +1,13 @@
 # RsTrie
 A generalized Trie implementation for Rust. The implementation supports generic tries, the only requirement is that the key 'fragments,' or the pieces that compose the key, be able to iterated from a key and collected into a key. The library has no external dependencies when not in development mode. In development mode there are several dependencies for benchmarking and the like.
 
+## Quickstart
+Add the following line to your dependencies,
+```toml
+[dependencies]
+rstrie = 0.5.0
+```
+The following code demonstrates a simple `Trie`:
 ```rust
 use rstrie::Trie;
 
@@ -12,7 +19,7 @@ assert_eq!(trie.get("hello".chars()), Some(&4));
 assert_eq!(trie.get("hey".chars(), Some(&5)));
 ```
 
-# Features
+## Features
 - A `Trie` that works with any data type.
 - Supports the same interfaces as `HashMap`
 - Longest prefix search
