@@ -25,34 +25,35 @@ impl Word {
 pub struct Sentence(String);
 
 impl<Q> FromIterator<Q> for Sentence
-where 
-    Q: Borrow<Word>
+where
+    Q: Borrow<Word>,
 {
     fn from_iter<T: IntoIterator<Item = Q>>(iter: T) -> Self {
-        Self(iter.into_iter().map(|innie| {
-            let r: &Word = innie.borrow();
-            r.0.clone()
-        }).collect::<Vec<_>>().join(" "))
+        Self(
+            iter.into_iter()
+                .map(|innie| {
+                    let r: &Word = innie.borrow();
+                    r.0.clone()
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
     }
 }
 
 fn find_completion(trie: &Trie<Word, ()>, search_str: &str) {
     println!("Finding completions for {search_str}...");
     // Find the completions for this phrase.
-    let completions: CompletionIter<'_, Word, (), Sentence> = trie.completions::<_, Word, Sentence>(Word::wordify(search_str));
+    let completions: CompletionIter<'_, Word, (), Sentence> =
+        trie.completions::<_, Word, Sentence>(Word::wordify(search_str));
 
     println!("Completions found:");
     for (completion, _) in completions {
         println!("- {}", completion.0)
     }
-
-
 }
 
-
-
 pub fn main() {
-
     println!("running simple trie...");
     let mut tree = Trie::<Word, ()>::new();
     tree.insert(Word::wordify("I like cats."), ());

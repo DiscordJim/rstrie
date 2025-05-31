@@ -2,7 +2,7 @@
 //!
 //! A [Trie] actually does not store keys directly but supports storing the individual
 //! fragments of what composes a key. For instance, a [String] trie will use [char] and will
-//! have the signature `Trie::<char, ()>`.
+//! have the signature `Trie::<char, ()>` ([Trie]).
 //!
 //! The [Trie] supports the entire API of the standard library's HashMap along with
 //! various common algorithms that a [Trie] data structure should support. This [Trie] implementation
@@ -27,25 +27,26 @@ use std::{
     iter::Peekable,
     marker::PhantomData,
     ops::{Deref, DerefMut, Index, IndexMut},
-    ptr::NonNull,
-    vec::Vec,
+    slice::GetDisjointMutError,
+    vec::IntoIter,
 };
 
-use list::{Node, NodeIndex, Slots};
-mod iter;
-mod node;
+use list::{DisjointMutIndices, Node, NodeIndex, Slots};
 
+use crate::list::SlotsIterMut;
 mod list;
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 /// A data strucur
 pub struct Trie<K, V> {
     /// The node pool, this is where the internal nodes are actually store. This
     /// improves cache locality and ease of access while limiting weird lifetime errors.
     node: Slots<K, V>,
-    // node: SlotMap<NodeKey, Node<K, V>>,
-    /// The root node of the pool. This is where things actually start searching.
-    root: NodeIndex,
     /// The amount of items in the Trie.
     size: usize,
 }
@@ -68,15 +69,15 @@ pub struct Trie<K, V> {
 struct WalkFailure<'a, I> {
     /// The root of the walk.
     root: NodeIndex,
-    /// The first node in the walk.
-    // first: Option<K>,
-    // first: K,
     /// The remainder of the path as an iterator.
     remainder: &'a mut I,
 }
 
+/// The walk trajectory. This is a list of node indexes that
+/// is used to construct various types/various operations within the [Trie].
 #[derive(Debug)]
 struct WalkTrajectory {
+    /// The list of indices.
     path: Vec<NodeIndex>,
 }
 
@@ -95,11 +96,16 @@ impl<K, V> Default for Trie<K, V> {
     }
 }
 
+/// The walk context object is a walk across the entire trie. It is
+/// driven forward with the [WalkCtx::drive] method.
 #[derive(Debug)]
 struct WalkCtx {
+    /// The pending paths to walk. Each of these is a stak.
     pending: Vec<Vec<NodeIndex>>,
 }
 
+/// Iterates automatically over the [WalkCtx] object by continually
+/// driving it forward using the [Trie] provided.
 struct WalkIter<'a, K, V> {
     trie: &'a Trie<K, V>,
     context: WalkCtx,
@@ -111,7 +117,7 @@ impl WalkCtx {
         while let Some(pending) = self.pending.pop() {
             let current = pending.last().unwrap();
 
-            for &child in trie.node[*current].sub_keys().rev() {
+            for &child in trie.node[*current].subkeys().rev() {
                 // Create a new path.
                 let mut new_path = pending.clone();
                 new_path.push(child);
@@ -125,38 +131,22 @@ impl WalkCtx {
         }
 
         None
-        // self.drive_with_stop(trie, |_| true)
     }
 }
 
 impl<K, V> Iterator for WalkIter<'_, K, V> {
     type Item = (NodeIndex, Vec<NodeIndex>);
+
+    /// Returns the next item in the [WalkIter].
     fn next(&mut self) -> Option<Self::Item> {
         self.context.drive(self.trie)
     }
 }
 
-#[derive(Clone, Debug)]
-pub enum TrieMatch<'a, K> {
-    Exact(&'a K),
-    Single,
-    Wildcard,
-    Never,
-}
-
-impl<K: PartialEq> TrieMatch<'_, K> {
-    pub fn is_match(&self, target: &K) -> bool {
-        match self {
-            TrieMatch::Exact(inner) => **inner == *target,
-            TrieMatch::Wildcard => true,
-            TrieMatch::Single => true,
-            TrieMatch::Never => false,
-        }
-    }
-}
-
-// The following are the internal 'developer' functions of the [Trie].
 impl<K, V> Trie<K, V> {
+    /// Given a path, traverses the [Trie], collecting them into the
+    /// return type. Very common method when the user requires the key fragments
+    /// to be combined into the entire key.
     fn collect_path_keys<'a, J>(&'a self, nodes: &[NodeIndex]) -> J
     where
         J: FromIterator<&'a K>,
@@ -168,10 +158,12 @@ impl<K, V> Trie<K, V> {
             .collect()
     }
 
-    /// Performs an internal wlak of the [Trie] but
-    /// receives the last node.
-    fn internal_walk_with_index<'a, 'b, I, B>(
-        &'a self,
+    /// Performs a standard internal walk of the [Trie] without any special
+    /// functor. This will return the last node in the walk. It is a convienence
+    /// method to ease the call signatures when we do not explicitly need to
+    /// perform any collection on the [Trie].
+    fn internal_walk_with_index<'b, I, B>(
+        &self,
         remainder: &'b mut Peekable<I>,
     ) -> Result<NodeIndex, WalkFailure<'b, Peekable<I>>>
     where
@@ -200,8 +192,8 @@ impl<K, V> Trie<K, V> {
     /// Performs an internal walk of the [Trie] and obtains the path
     /// used to get there. Internally, this just calls the internal walk
     /// function and has it collect the nodes as we go.
-    fn internal_walk_with_path_fn<'a, 'b, I, F, B>(
-        &'a self,
+    fn internal_walk_with_path_fn<'b, I, F, B>(
+        &self,
         remainder: &'b mut Peekable<I>,
         mut functor: F,
     ) -> Result<WalkTrajectory, WalkFailure<'b, Peekable<I>>>
@@ -223,13 +215,15 @@ impl<K, V> Trie<K, V> {
         })
     }
 
-    /// Collects the key
-    fn key_collect<'a>(&'a self, node: NodeIndex, array: &mut Vec<&'a K>) {
+    /// Given a [NodeIndex] and an array, this will fold the key into the
+    /// array ONLY if the key links to a non-root node (one where the key is not null).
+    fn fold_in_key_optionally<'a>(&'a self, node: NodeIndex, array: &mut Vec<&'a K>) {
         if let Some(inner) = self.node[node].key() {
             array.push(inner);
         }
     }
 
+    /// Performs an internal walk of the [Trie] but collects the key as we go.
     fn internal_walk_collect_key<'a, I, J, B>(
         &self,
         remainder: &'a mut Peekable<I>,
@@ -241,13 +235,16 @@ impl<K, V> Trie<K, V> {
         for<'b> J: FromIterator<&'b K>,
     {
         let mut collector = vec![];
-        let index =
-            self.internal_walk_with_fn(remainder, |nk| self.key_collect(nk, &mut collector))?;
+        let index = self.internal_walk_with_fn(remainder, |nk| {
+            self.fold_in_key_optionally(nk, &mut collector)
+        })?;
         Ok((collector.into_iter().collect::<J>(), index))
     }
 
+    /// Starts an iterative walk of the [Trie] starting at
+    /// the specified root. This allows for efficient and truly
+    /// lazy iteration over parts of the [Trie] in a no-copy way.
     fn perform_walk(&self, root: NodeIndex) -> WalkCtx {
-        // self.walk_path(self.root);
         WalkCtx {
             pending: vec![vec![root]],
         }
@@ -262,8 +259,8 @@ impl<K, V> Trie<K, V> {
     ///
     /// If the walk cannot be completed, we return a [WalkFailure] struct that contains the necessary
     /// information to perform insertion.
-    fn internal_walk_with_fn<'a, 'b, I, F, B>(
-        &'a self,
+    fn internal_walk_with_fn<'b, I, F, B>(
+        &self,
         remainder: &'b mut Peekable<I>,
         visitor_fn: F,
     ) -> Result<NodeIndex, WalkFailure<'b, Peekable<I>>>
@@ -274,36 +271,6 @@ impl<K, V> Trie<K, V> {
         F: FnMut(NodeIndex),
     {
         self.internal_walk_with_fn_cmp(remainder, visitor_fn, |a, b| a.cmp(b.borrow()))
-        // // The root for the path.
-        // visitor_fn(self.root);
-
-        // let mut end = &self.root;
-        // loop {
-        //     let Some(current) = remainder.peek() else {
-        //         break;
-        //     };
-
-        //     // Call on the current node.
-        //     visitor_fn(*end);
-
-        //     if let Some(slot) = self.node[*end].get(current, &self.node) {
-        //         end = slot;
-        //     } else {
-        //         return Err(WalkFailure {
-        //             root: *end,
-        //             remainder,
-        //         });
-        //     }
-
-        //     // Actually consume.
-        //     remainder.next();
-        // }
-
-        // // Call on the very last index, if we reach this point this is indicatvie
-        // // of a succesful complete walk.
-        // visitor_fn(*end);
-
-        // Ok(*end)
     }
     /// Performs an internal walk of the [Trie]. This is the most important function
     /// for the operation of the [Trie]. It takes in a visitor function that is called
@@ -327,9 +294,9 @@ impl<K, V> Trie<K, V> {
         for<'b> C: FnMut(&'b K, &'b B) -> Ordering,
     {
         // The root for the path.
-        visitor_fn(self.root);
+        visitor_fn(NodeIndex::ROOT);
 
-        let mut end = &self.root;
+        let mut end = &NodeIndex::ROOT;
         loop {
             let Some(current) = remainder.peek() else {
                 break;
@@ -396,7 +363,6 @@ impl<K, V> Trie<K, V> {
     pub fn with_capacity(slots: usize) -> Self {
         Self {
             node: Slots::with_capacity(slots),
-            root: NodeIndex { position: 0 },
             size: 0,
         }
     }
@@ -458,16 +424,15 @@ impl<K, V> Trie<K, V> {
     ///
     /// let shortest = trie.search_with_score_fn(|c| Reverse(c.len()));
     /// assert_eq!(shortest, Some(vec![ &'1' ]));
-    ///
     /// ```
-    pub fn search_with_score_fn<'a, F, B>(&'a self, mut distance: F) -> Option<Vec<&'a K>>
+    pub fn search_with_score_fn<F, B>(&self, mut distance: F) -> Option<Vec<&K>>
     where
         K: Ord,
         F: FnMut(&[&K]) -> B,
         B: Ord,
     {
         let full_walk = WalkIter {
-            context: self.perform_walk(self.root),
+            context: self.perform_walk(NodeIndex::ROOT),
             trie: self,
         };
 
@@ -477,10 +442,7 @@ impl<K, V> Trie<K, V> {
         for (_, node_index) in full_walk {
             let collected = self.collect_path_keys::<Vec<_>>(&node_index);
             let score = distance(&collected);
-            if best_score.is_none() {
-                best_score = Some(score);
-                best_candidate = Some(collected);
-            } else if *best_score.as_ref().unwrap() < score {
+            if best_score.is_none() || *best_score.as_ref().unwrap() < score {
                 best_score = Some(score);
                 best_candidate = Some(collected);
             }
@@ -521,7 +483,7 @@ impl<K, V> Trie<K, V> {
     {
         let mut collector = vec![];
         match self.internal_walk_with_fn(key.into_iter().peekable().by_ref(), |nk| {
-            self.key_collect(nk, &mut collector)
+            self.fold_in_key_optionally(nk, &mut collector)
         }) {
             Ok(inner) => CompletionIter {
                 beginning: collector,
@@ -571,7 +533,7 @@ impl<K, V> Trie<K, V> {
     {
         let mut collector = vec![];
         match self.internal_walk_with_fn(key.into_iter().peekable().by_ref(), |nk| {
-            self.key_collect(nk, &mut collector)
+            self.fold_in_key_optionally(nk, &mut collector)
         }) {
             Ok(inner) => PostfixIter {
                 inner: self.perform_walk(inner),
@@ -710,13 +672,13 @@ impl<K, V> Trie<K, V> {
     pub fn into_values(mut self) -> ValueIter<V> {
         let values = self
             .node
-            .drain()
-            .map(|v| v.into_value())
-            .filter(Option::is_some)
-            .collect::<Vec<Option<V>>>();
+            .drain_slots()
+            .flatten()
+            .filter_map(Node::into_value)
+            .collect::<Vec<V>>();
 
         ValueIter {
-            inner: iter::Iter::new(values),
+            inner: values.into_iter(),
         }
     }
     /// Returns the longest prefix match.
@@ -778,8 +740,7 @@ impl<K, V> Trie<K, V> {
     pub fn longest_prefix<I, B>(&self, key: I) -> Option<&V>
     where
         I: IntoIterator<Item = B>,
-        I::IntoIter: Debug,
-        K: Ord + Debug,
+        K: Ord,
         B: Borrow<K>,
     {
         let mut last_productive = NodeIndex::ROOT;
@@ -835,7 +796,7 @@ impl<K, V> Trie<K, V> {
     {
         KeyIter {
             inner: WalkIter {
-                context: self.perform_walk(self.root),
+                context: self.perform_walk(NodeIndex::ROOT),
                 trie: self,
             },
             _type: PhantomData,
@@ -866,7 +827,7 @@ impl<K, V> Trie<K, V> {
         for<'a> J: FromIterator<&'a K>,
     {
         IntoEntryIter {
-            inner: self.perform_walk(self.root),
+            inner: self.perform_walk(NodeIndex::ROOT),
             trie: self,
             _type: PhantomData,
         }
@@ -896,7 +857,7 @@ impl<K, V> Trie<K, V> {
     {
         EntryIterRef {
             inner: WalkIter {
-                context: self.perform_walk(self.root),
+                context: self.perform_walk(NodeIndex::ROOT),
                 trie: self,
             },
             _type: PhantomData,
@@ -925,7 +886,7 @@ impl<K, V> Trie<K, V> {
         for<'a> J: FromIterator<&'a K>,
     {
         EntryIterMut {
-            inner: self.perform_walk(self.root),
+            inner: self.perform_walk(NodeIndex::ROOT),
             trie: self,
             // slot: None,.
             _type: PhantomData,
@@ -959,23 +920,23 @@ impl<K, V> Trie<K, V> {
     fn try_get_key_map<I, B, const N: usize>(
         &mut self,
         keys: [I; N],
-    ) -> Result<[Option<NodeIndex>; N], NodeIndex>
+    ) -> Result<[NodeIndex; N], NodeIndex>
     where
         I: IntoIterator<Item = B>,
         K: Ord,
         B: Borrow<K>,
     {
-        let mut array = [None::<NodeIndex>; N];
+        let mut array = [NodeIndex::ROOT; N];
 
         for (i, k) in keys.into_iter().enumerate() {
             let candidate = self.lookup_key(k);
 
             if let Some(candidate) = candidate {
-                if array.contains(&Some(candidate)) {
+                if array.contains(&candidate) {
                     return Err(candidate);
                 }
             }
-            array[i] = candidate;
+            array[i] = candidate.unwrap();
         }
 
         Ok(array)
@@ -993,13 +954,16 @@ impl<K, V> Trie<K, V> {
     /// tree.insert("world".chars(), 4);
     ///
     /// let mut keys = tree.get_disjoint_mut([ "hello".chars(), "world".chars() ]);
-    /// **keys[0].as_mut().unwrap() = 4;
-    /// **keys[1].as_mut().unwrap() = 2;
+    /// *keys[0].as_mut().unwrap() = 4;
+    /// *keys[1].as_mut().unwrap() = 2;
     ///
     /// assert_eq!(tree.get("hello".chars()), Some(&4));
     /// assert_eq!(tree.get("world".chars()), Some(&2));
     /// ```
-    pub fn get_disjoint_mut<I, B, const N: usize>(&mut self, keys: [I; N]) -> [Option<&mut V>; N]
+    pub fn get_disjoint_mut<I, B, const N: usize>(
+        &mut self,
+        keys: [I; N],
+    ) -> DisjointMutIndices<'_, K, V, N>
     where
         I: IntoIterator<Item = B>,
         K: Ord,
@@ -1007,27 +971,6 @@ impl<K, V> Trie<K, V> {
     {
         self.try_get_disjoint_mut(keys)
             .expect("Keys were overlapping.")
-    }
-
-    /// Using an array of node keys, fetch many mutable pointers.
-    fn get_many_mut_ptr<const N: usize>(
-        &mut self,
-        keys: [Option<NodeIndex>; N],
-    ) -> [Option<NonNull<V>>; N] {
-        let mut many: [Option<NonNull<V>>; N] = core::array::from_fn(|_| None);
-
-        for i in 0..N {
-            match keys[i] {
-                Some(inner) => {
-                    let fetched = self.node[inner].value_mut().as_mut().unwrap() as *mut V;
-
-                    // SAFETY: Pointer is not null.
-                    many[i] = Some(unsafe { NonNull::new_unchecked(fetched) });
-                }
-                None => many[i] = None,
-            }
-        }
-        many
     }
     /// Attempts to get many mutable references to the array with a set of
     /// valid keys. All keys must be disjoint and valid or else the entire
@@ -1042,8 +985,8 @@ impl<K, V> Trie<K, V> {
     /// tree.insert("world".chars(), 4);
     ///
     /// let mut keys = tree.try_get_disjoint_mut([ "hello".chars(), "world".chars() ]).unwrap();
-    /// **keys[0].as_mut().unwrap() = 4;
-    /// **keys[1].as_mut().unwrap() = 2;
+    /// *keys[0].as_mut().unwrap() = 4;
+    /// *keys[1].as_mut().unwrap() = 2;
     ///
     /// assert_eq!(tree.get("hello".chars()), Some(&4));
     /// assert_eq!(tree.get("world".chars()), Some(&2));
@@ -1051,7 +994,7 @@ impl<K, V> Trie<K, V> {
     pub fn try_get_disjoint_mut<I, B, const N: usize>(
         &mut self,
         keys: [I; N],
-    ) -> Result<[Option<&mut V>; N], &'static str>
+    ) -> Result<DisjointMutIndices<K, V, N>, GetDisjointMutError>
     where
         I: IntoIterator<Item = B>,
         K: Ord,
@@ -1060,20 +1003,8 @@ impl<K, V> Trie<K, V> {
         // Calculate the key map.
         let array = self
             .try_get_key_map(keys)
-            .map_err(|_| "Keys were not disjoint.")?;
-
-        // Get the pointer map.
-        let mut ptr_map: [Option<NonNull<V>>; N] = self.get_many_mut_ptr(array);
-
-        // Create proper references from these.
-        let mut resulting = core::array::from_fn(|_| None);
-        for i in 0..N {
-            // SAFETY: The pointer is not null and all values are disjoint by
-            // the invariants of the the [Trie::try_get_key_map] call.
-            resulting[i] = ptr_map[i].take().map(|mut i| unsafe { i.as_mut() });
-        }
-
-        Ok(resulting)
+            .map_err(|_| GetDisjointMutError::OverlappingIndices)?;
+        self.node.get_disjoint_mut(array)
     }
 
     /// Gets a mutable reference of a value from the [Trie] according to
@@ -1227,7 +1158,7 @@ impl<K, V> Trie<K, V> {
         let mut path = vec![];
         let trajectory = self
             .internal_walk_with_path_fn(key.into_iter().peekable().by_ref(), |nk| {
-                self.key_collect(nk, &mut path)
+                self.fold_in_key_optionally(nk, &mut path)
             })
             .ok()?;
 
@@ -1263,25 +1194,24 @@ impl<K, V> Trie<K, V> {
     pub fn remove<I, B>(&mut self, master: I) -> Option<V>
     where
         I: IntoIterator<Item = B>,
-        K: Ord + Debug,
+        K: Ord,
         B: Borrow<K>,
     {
+        // Calculate the removal trajectory.
         let trajectory = self
             .internal_walk_with_path(master.into_iter().peekable().by_ref())
             .ok()?;
 
-        println!("TRAJECTORY: {:?}", trajectory);
-
-        for i in& trajectory.path {
-            println!("Word: {:?}", self.node[*i].key());
-        }
-
-        self.remove_post_walk(&trajectory.path).inspect(|_| self.size -= 1)
+        // Remove and then correct the removal.
+        self.remove_post_walk(&trajectory.path)
+            .inspect(|_| self.size -= 1)
     }
 
-
+    /// Detaches a node and its subkeys recursively. Since subkeys are
+    /// always dependent on their parent, this is equivalent to just deleting
+    /// a subtree.
     fn detach_node(&mut self, source: NodeIndex) {
-        let keys = self.node[source].sub_keys().copied().collect::<Vec<_>>();
+        let keys = self.node[source].subkeys().copied().collect::<Vec<_>>();
         for i in keys {
             self.detach_node(i);
         }
@@ -1293,72 +1223,50 @@ impl<K, V> Trie<K, V> {
     ///
     /// This method exists to allow us to easily implement remove entry
     /// without having to walk the tree a second time to reconstruct the [Trie].
-    fn remove_post_walk<'a>(&'a mut self, path: &[NodeIndex]) -> Option<V>
+    fn remove_post_walk(&mut self, path: &[NodeIndex]) -> Option<V>
     where
-        // T: Iterator<Item = &'a NodeIndex>,
         K: Ord,
     {
-
-        // let mut value = &mut self.node[*path.last()?];
         let internal_value = self.node[*path.last()?].value_mut().take();
 
         let mut sub_index: isize = (path.len() - 1) as isize;
+
+        // Starting at the very end, this travels up the tree, removing
+        // all nodes attached to the tail that are no longer valid.
         while sub_index >= 0 {
             // Selected index.
             let sh_index = path[sub_index as usize];
-            println!("PATH: {:?} | -> {:?} {:?}", path, path[sub_index as usize], self.node[path[sub_index as usize]].sub_key_len());
+
+            // If we do not have children...
+            // WHY? Because if we have children, clearly this forms
+            // part of a superkey, and thus removing it would then remove
+            // that as well. Consider:
+            //
+            // "Yes"
+            // "Yesman"
+            //
+            // Both of these share a subtree, but deleting "Yes" should
+            // not also delete "Yesman".
             if self.node[sh_index].sub_key_len() == 0 {
-                // println!("YEs");
-                // First detach the node.
-                println!("DETACH {:?}", sh_index);
+                
+                // Detach the node....
                 self.detach_node(sh_index);
 
                 // Then if there is something that is above it, remove it.
-                if sub_index - 1 >= 0 {
+                if sub_index > 0 {
                     let above = path[(sub_index - 1) as usize];
-                    println!("DELETING ABOVE {:?}", above);
                     self.node[above].remove_subkey(sh_index);
                 }
+            } else {
+                // If we have children, then clearly this is a valid path, so we will
+                // not detach it and thus the path that preceeds this node is still valid,
+                // so there is no purpose in continuation.
+                break;
             }
             sub_index -= 1;
         }
 
-
-
-
-
         internal_value
-
-        // let mut first = false;
-        // let mut value = None;
-
-        // let mut previous = None;
-        // for iter in path {
-        //     if let Some(previous) = previous {
-        //         self.node.remove(previous);
-        //     }
-
-        //     if !first {
-        //         value = self.node[*iter].value_mut().take();
-
-        //         first = true;
-        //     } else if self.node[*iter].sub_key_len() == 1 && !self.node[*iter].is_root() {
-        //         println!("TRIGGERED REMOVAL for {:?}", iter);
-        //         self.node.remove(*iter);
-        //     } else {
-        //         println!("REMOVING SUBKEY FROM SOURCE {iter:?} AND REMOVING {:?}", previous.as_ref().unwrap());
-        //         self.node.remove_subkey(*iter, *previous.as_ref().unwrap());
-        //         // remove_node_subkey_by_key(*iter, *previous.as_ref().unwrap(), &mut self.node);
-        //         break; // we are back in a consistent state.
-        //     }
-
-        //     previous = Some(*iter);
-        // }
-
-        // if value.is_some() {
-        //     self.size -= 1;
-        // }
-        // value
     }
     /// Checks if the [Trie] contains a key. This operation
     /// occurs in the same time as [Trie::get].
@@ -1410,15 +1318,19 @@ impl<K, V> Trie<K, V> {
     pub fn insert<I>(&mut self, master: I, value: V) -> Option<V>
     where
         I: IntoIterator<Item = K>,
-        K: Debug,
         K: Ord,
     {
-        self.size += 1;
-
         match self.internal_walk_with_index(master.into_iter().peekable().by_ref()) {
             Ok(v) => {
+
+                // This node already exists, so replace it and then return
+                // the previous value.
                 let current = self.node[v].value_mut().take();
+                if current.is_none() {
+                    self.size += 1;
+                }
                 *self.node[v].value_mut() = Some(value);
+
                 current
             }
             Err(WalkFailure {
@@ -1429,17 +1341,15 @@ impl<K, V> Trie<K, V> {
                 for item in remainder {
                     nk = Some(self.node.insert(Node::keyed(item)));
                     self.node.insert_subkey(root, nk.unwrap());
-                    // insert_node_subkey(root, nk.unwrap(), &mut self.node);
                     root = nk.unwrap();
                 }
-
                 *self.node[nk.unwrap()].value_mut() = Some(value);
-
+                self.size += 1;
                 None
             }
         }
-        // }
     }
+
     /// This will remove any unused space in the underlying arena allocator and
     /// then shrink the arena to fit this data. This can help improve cache locality.
     ///
@@ -1467,32 +1377,6 @@ impl<K, V> Trie<K, V> {
     }
 }
 
-// pub struct LazyKey<'a, K, J, V>
-// where
-//     for<'b> J: FromIterator<&'b K>
-// {
-//     inner: LazyKeyInner<'a, K, J, V>
-// }
-
-// enum LazyKeyInner<'a, K, J, V> {
-//     Resolved(J),
-//     Plan {
-//         sequence: Vec<NodeIndex>,
-//         map: &'a Trie<K, V>
-//     }
-// }
-
-// impl<'a, K, J, V> LazyKeyInner<'a, K, J, V> {
-//     pub fn key(self) -> LazyKeyInner<'a, K, J, V> {
-//         match self {
-//             LazyKeyInner::Resolved(inner) => Self::Resolved(inner),
-//             LazyKeyInner::Plan { sequence, map } => {
-//                 LazyKeyInner::Resolved(map.no)
-//             }
-//         }
-//     }
-// }
-
 #[derive(Debug)]
 pub struct CompletionIter<'a, K, V, J> {
     trie: &'a Trie<K, V>,
@@ -1514,41 +1398,6 @@ pub struct PostfixIter<'a, K, V, J> {
     /// The value to which the iterators will be transformed during iteration.
     _transform: PhantomData<J>,
 }
-
-// fn insert_node_subkey<K: Ord, V>(
-//     source: NodeIndex,
-//     value: NodeIndex,
-//     buffer: &mut Slots<K, V>,
-// ) -> Option<NodeIndex> {
-//     match buffer[source].bin_search(value, buffer) {
-//         Ok(valid) => {
-//             let old = std::mem::replace(&mut buffer[source].sub_keys[valid], value);
-//             Some(old)
-//         }
-//         Err(invalid) => {
-//             buffer[source].sub_keys.insert(invalid, value);
-//             None
-//         }
-//     }
-
-//     buffer[source].insert_subkey(value, buffer)
-//     // None
-// }
-
-// fn remove_node_subkey_by_key<K: Ord, V>(
-//     source: NodeIndex,
-//     to_remove: NodeIndex,
-//     buffer: &mut Slots<K, V>,
-// ) -> Option<NodeIndex> {
-//     // let result = buffer[source]
-//     //     .sub_keys()
-//     //     .position(|s| *s == to_remove)?;
-
-//     // let elem = buffer[source].sub_keys.remove(result);
-//     let elem = buffer[source].remove_subkey(to_remove)?;
-
-//     Some(elem)
-// }
 
 impl<I, K, V> Index<I> for Trie<K, V>
 where
@@ -1578,7 +1427,7 @@ where
     }
 }
 
-impl<'a, K: Debug, V, J> Iterator for CompletionIter<'a, K, V, J>
+impl<'a, K, V, J> Iterator for CompletionIter<'a, K, V, J>
 where
     J: FromIterator<&'a K>,
 {
@@ -1613,7 +1462,7 @@ where
     }
 }
 
-impl<'a, K: Debug, V, J> Iterator for PostfixIter<'a, K, V, J>
+impl<'a, K, V, J> Iterator for PostfixIter<'a, K, V, J>
 where
     J: FromIterator<&'a K>,
 {
@@ -1667,7 +1516,7 @@ where
         .map(|nk| trie.node[nk].key())
         .filter_map(<Option<K>>::as_ref);
 
-    let actual_key = beginning
+    beginning
         .iter()
         // The following lines just omit the very last element.
         .rev()
@@ -1675,9 +1524,7 @@ where
         .rev()
         .copied()
         .chain(tail_end)
-        .collect::<J>();
-
-    actual_key
+        .collect::<J>()
 }
 
 impl<K, V, I> IndexMut<I> for Trie<K, V>
@@ -1703,12 +1550,17 @@ where
     }
 }
 
-// An iterator created by consuming the [Trie].
-// Contains all the entries of the [Trie].
+/// An iterator created by consuming the [Trie].
+/// Contains all the entries of the [Trie].
 pub struct EntryIterMut<'a, K, V, J> {
-    // value: ValueIterMut<'a, K, V>,
+    /// The internal reference to the [Trie].
     trie: &'a mut Trie<K, V>,
+    /// The walk context for iterating over the fields.
     inner: WalkCtx,
+    /// The type that we will collect into. Although technically
+    /// we could collect into a different type on each iteration, we
+    /// want to avoid this type of strange behaviour and streamline
+    /// the process.
     _type: PhantomData<J>,
 }
 
@@ -1741,7 +1593,7 @@ pub struct KeyIter<'a, K, V, J> {
 ///
 /// Contains all the elements of the [Trie].
 pub struct ValueIter<V> {
-    inner: crate::iter::Iter<V>,
+    inner: IntoIter<V>,
 }
 
 /// An iterator over the values of a [Trie].
@@ -1752,13 +1604,17 @@ pub struct ValueIterRef<'a, K, V> {
 /// An iterator over the values of a [Trie]
 /// that provides mutable references.
 pub struct ValueIterMut<'a, K, V> {
-    values: std::slice::IterMut<'a, Option<Node<K, V>>>,
+    values: SlotsIterMut<'a, K, V>,
 }
 
-// SPECIAL IMPL
+
 impl<V> Trie<char, V> {
+    /// A special implementation of the [Trie] 
     pub fn insert_str(&mut self, key: &str, value: V) -> Option<V> {
         self.insert(key.chars(), value)
+    }
+    pub fn remove_str(&mut self, key: &str) -> Option<V> {
+        self.remove(key.chars())
     }
 }
 
@@ -1798,7 +1654,7 @@ where
     }
 }
 
-impl<'a, K: Clone, V, J> Iterator for EntryIterMut<'a, K, V, J>
+impl<'a, K, V, J> Iterator for EntryIterMut<'a, K, V, J>
 where
     for<'b> J: FromIterator<&'b K>,
 {
@@ -1862,50 +1718,13 @@ impl<K, V> DerefMut for ValueSlot<'_, K, V> {
 
 impl<K, V> PartialEq for Trie<K, V>
 where
-    K: PartialEq + Debug,
-    V: PartialEq + Debug,
-    Node<K, V>: Debug
+    K: PartialEq,
+    V: PartialEq,
 {
     /// Checks if two [Trie] are equal.
     fn eq(&self, other: &Self) -> bool {
         self.node.eq(&other.node)
-        // for node in self.node.slot_iter().filter_map(|f| f.as_ref()) {
-        //     if !other
-        //         .node
-        //         .slot_iter()
-        //         .filter_map(|f| f.as_ref())
-        //         .any(|o_node| {
-        //             node.key() == o_node.key() // make the keys equal.
-        //         && check_node_key_equivalences(node, o_node, &self.node, &other.node)
-        //         && check_node_key_equivalences(o_node, node, &other.node, &self.node)
-        //         })
-        //     {
-        //         return false;
-        //     }
-        // }
-
-        // true
     }
-}
-
-fn check_node_key_equivalences<K, V>(
-    node_a: &Node<K, V>,
-    node_b: &Node<K, V>,
-    pool_a: &Slots<K, V>,
-    pool_b: &Slots<K, V>,
-) -> bool
-where
-    K: Eq,
-{
-    node_a.sub_keys().all(|key_a| {
-        // For every a key.
-        let value = pool_a[*key_a].key();
-        node_b
-            .sub_keys()
-            .any(|key_b| pool_b[*key_b].key() == value)
-    });
-
-    true
 }
 
 impl<'a, K, V, J> Iterator for EntryIterRef<'a, K, V, J>
@@ -2021,17 +1840,14 @@ impl<'a, K, V> Iterator for ValueIterMut<'a, K, V> {
             // so if this is none then we are done anyways.
             let node = self.values.next()?;
             // We need to extract the value, and we continue until the value is something.
-            current = map_node_to_value_mut(node.as_mut());
+            current = node.value_mut().as_mut();
         }
 
         current
     }
 }
 
-fn map_node_to_value_mut<K, V>(option: Option<&mut Node<K, V>>) -> Option<&mut V> {
-    let val = option?;
-    val.value_mut().as_mut()
-}
+
 
 fn map_node_to_value<K, V>(option: Option<&Node<K, V>>) -> Option<&V> {
     let val = option?;
@@ -2074,7 +1890,7 @@ impl<'a, K, V> Iterator for ValueIterRef<'a, K, V> {
 
 impl<KP, K, V> Extend<(KP, V)> for Trie<K, V>
 where
-    K: Ord + Debug,
+    K: Ord,
     KP: IntoIterator<Item = K>,
 {
     /// Extends a [Trie] from an iterator of tuples. The tuples must contain
@@ -2102,7 +1918,7 @@ where
 
 impl<'a, KP, K, V> Extend<(KP, &'a V)> for Trie<K, V>
 where
-    K: Ord + Clone + Debug,
+    K: Ord,
     V: Clone,
     KP: IntoIterator<Item = K>,
 {
@@ -2131,7 +1947,7 @@ where
 
 impl<KP, K, V> FromIterator<(KP, V)> for Trie<K, V>
 where
-    K: Ord + Debug,
+    K: Ord,
     KP: IntoIterator<Item = K>,
 {
     /// Creates a [Trie] from an iterator of tuples. The tuples must contain
@@ -2157,7 +1973,7 @@ where
 
 impl<KP, K, V, const N: usize> From<[(KP, V); N]> for Trie<K, V>
 where
-    K: Ord + Debug,
+    K: Ord,
     KP: IntoIterator<Item = K>,
 {
     /// Creates a [Trie] from an array of tuples. The tuples must contain
@@ -2198,12 +2014,170 @@ impl<K, V, J> Iterator for Drain<'_, K, V, J> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+mod arbitrary_trie {
+    use core::f32;
+    use std::fmt::Debug;
+
+    use arbitrary::{Arbitrary, Unstructured};
+
+    use crate::Trie;
+
+    fn random_norm_float(u: &mut Unstructured<'_>) -> arbitrary::Result<f32> {
+        Ok(f32::from_bits(u32::arbitrary(u)?).abs() / f32::MAX)
+    }
+
+    impl<'a, K, V> Arbitrary<'a> for Trie<K, V>
+    where
+        K: Arbitrary<'a> + Ord + Clone,
+        V: Arbitrary<'a>,
+    {
+        fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+            let mut trie = Trie::<K, V>::new();
+            let trie_length = u16::arbitrary(u)? as usize;
+            let mut buffer = Vec::new();
+            for i in 0..trie_length {
+                let vector: Vec<K> = Vec::arbitrary(u)?;
+                let value = V::arbitrary(u)?;
+
+                buffer.push(Some(vector.clone()));
+
+                trie.insert(vector.into_iter(), value);
+
+                // println!("ADD {i}\t|\t{}\t|\t{:?}", trie.len(), buffer.last());
+            }
+
+            // println!("Buffer: {:?}", buffer);
+
+            let thres = random_norm_float(u)?;
+            for i in 0..buffer.len() {
+                // println!("YO:\t{}\t|\t{}\t|\t{:?}", i, trie.len(), buffer.get_mut(i));
+                if random_norm_float(u)? < thres {
+                    // println!("TRIE: {:?}", trie);
+                    let key = buffer.get_mut(i).unwrap().take().unwrap();
+                    trie.remove(key.into_iter());
+                }
+            }
+
+            Ok(trie)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
-    use std::cmp::Reverse;
+    use std::{cmp::Reverse, time::Duration};
 
     use super::Trie;
+
+    #[test]
+    #[cfg(feature = "arbitrary")]
+    pub fn test_arbitrary_crate() {
+        use arbitrary::{Arbitrary, Unstructured};
+        use rand::Rng;
+
+        let val: [u8; 12] = rand::rng().random();
+
+        let trie: Trie<char, usize> = Trie::arbitrary(&mut Unstructured::new(&val)).unwrap();
+        let trie2: Trie<char, usize> = Trie::arbitrary(&mut Unstructured::new(&val)).unwrap();
+        assert_eq!(trie, trie2);
+    }
+
+    #[test]
+    pub fn test_root_len_mod() {
+        let mut trie = Trie::<char, usize>::new();
+
+        assert_eq!(trie.len(), 0);
+        trie.insert_str("", 3);
+        assert_eq!(trie.len(), 1);
+
+        trie.insert_str("", 4);
+        assert_eq!(trie.len(), 1);
+
+        trie.remove_str("");
+        assert_eq!(trie.len(), 0);
+    }
+
+    #[test]
+    pub fn test_size_duplicates() {
+        let mut trie = Trie::<char, usize>::from([
+            ("hello".chars(), 4),
+            ("hey".chars(), 3),
+            ("hamburger".chars(), 10),
+        ]);
+
+        assert_eq!(trie.len(), 3);
+        trie.insert("hello".chars(), 4);
+        assert_eq!(trie.len(), 3);
+
+        trie.insert("heman".chars(), 10);
+        assert_eq!(trie.len(), 4);
+
+        trie.remove("heman".chars());
+        assert_eq!(trie.len(), 3);
+
+        trie.remove("heman".chars());
+        assert_eq!(trie.len(), 3);
+
+        trie.remove("albert".chars());
+        assert_eq!(trie.len(), 3);
+    }
+
+    #[test]
+    #[cfg(all(feature = "arbitrary", feature = "serde"))]
+    pub fn arbtest_arb_impl() {
+        use arbitrary::Arbitrary;
+
+        arbtest::arbtest(|u| {
+            let standard = Trie::<char, usize>::arbitrary(u)?;
+            let reversed: Trie<char, usize> =
+                serde_json::from_slice(&serde_json::to_vec(&standard).unwrap()).unwrap();
+            assert_eq!(standard, reversed);
+            Ok(())
+        })
+        .budget(Duration::from_secs(5));
+    }
+
+    #[test]
+    pub fn test_delete_root_vector() {
+        let mut root = Trie::<char, usize>::from([("hello".chars(), 4)]);
+        root.insert([], 5);
+        root.remove::<[char; 0], char>([]);
+        root.remove::<[char; 0], char>([]);
+    }
+
+    #[test]
+    #[cfg(all(feature = "rkyv", feature = "serde"))]
+    pub fn arbtest_arb_impl_rkyv() {
+        use arbitrary::Arbitrary;
+        use rkyv::rancor::Error;
+
+        arbtest::arbtest(|u| {
+            let standard = Trie::<char, u64>::arbitrary(u)?;
+
+            // println!("STADNAR: {:?}", standard);
+
+            let archived = rkyv::to_bytes::<Error>(&standard).unwrap();
+
+            let archived: Trie<char, u64> = rkyv::from_bytes::<_, Error>(&archived).unwrap();
+
+            // let reversed: Trie<char, usize> = serde_json::from_slice(&serde_json::to_vec(&standard).unwrap()).unwrap();
+            assert_eq!(standard, archived);
+            Ok(())
+        })
+        .budget(Duration::from_secs(5));
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    pub fn test_serde_serialize_map() {
+        let tree = Trie::<char, usize>::from([("hello".chars(), 4), ("hey".chars(), 5)]);
+
+        let val = serde_json::to_vec(&tree).unwrap();
+        let tree2: Trie<char, usize> = serde_json::from_slice(&val).unwrap();
+        assert_eq!(tree, tree2);
+    }
 
     #[test]
     pub fn trie_get_kv_properly() {
@@ -2252,8 +2226,8 @@ mod tests {
 
         let mut keys = tree.get_disjoint_mut(["hello".chars(), "world".chars()]);
 
-        **keys[0].as_mut().unwrap() = 4;
-        **keys[1].as_mut().unwrap() = 2;
+        *keys[0].as_mut().unwrap() = 4;
+        *keys[1].as_mut().unwrap() = 2;
 
         assert_eq!(tree.get("hello".chars()), Some(&4));
         assert_eq!(tree.get("world".chars()), Some(&2));
@@ -2261,48 +2235,37 @@ mod tests {
 
     #[test]
     pub fn test_trie_equality_simple() {
-        let trie_1 = Trie::from([
-            ("hello".chars(), 3),
-            ("good".chars(), 2)
-        ]);
-        let trie_2 = Trie::from([
-            ("hello".chars(), 3),
-            ("good".chars(), 2)
-        ]);
-        let trie_3 = Trie::from([
-            ("hello".chars(), 3),
-            ("good".chars(), 3)
-        ]);
+        let trie_1 = Trie::from([("hello".chars(), 3), ("good".chars(), 2)]);
+        let trie_2 = Trie::from([("hello".chars(), 3), ("good".chars(), 2)]);
+        let trie_3 = Trie::from([("hello".chars(), 3), ("good".chars(), 3)]);
         assert_eq!(trie_1, trie_2);
         assert_ne!(trie_1, trie_3);
     }
 
     #[test]
+    pub fn test_into_values() {
+        let mut trie: Trie<char, usize> = Trie::from([("".chars(), 1), ("tra".chars(), 2)]);
+
+        let mut values = trie.into_values();
+        assert_eq!(values.next(), Some(1));
+        assert_eq!(values.next(), Some(2));
+    }
+
+    #[test]
     pub fn test_removal_subword() {
-        let mut trie_1 = Trie::from([
-            ("hello".chars(), 3),
-            ("good".chars(), 2)
-        ]);
+        let mut trie_1 = Trie::from([("hello".chars(), 3), ("good".chars(), 2)]);
 
         trie_1.insert("go".chars(), 8);
         assert_eq!(trie_1.remove("go".chars()), Some(8));
         assert!(trie_1.contains_key("good".chars()));
 
-
         // panic!("ye");
-
     }
 
     #[test]
     pub fn test_trie_equality_complex() {
-        let mut trie_1 = Trie::from([
-            ("hello".chars(), 3),
-            ("good".chars(), 2)
-        ]);
-        let mut trie_2 = Trie::from([
-            ("hello".chars(), 3),
-            ("good".chars(), 2)
-        ]);
+        let mut trie_1 = Trie::from([("hello".chars(), 3), ("good".chars(), 2)]);
+        let mut trie_2 = Trie::from([("hello".chars(), 3), ("good".chars(), 2)]);
         trie_2.remove("hello".chars());
         trie_2.insert("hey".chars(), 12);
         trie_2.insert("hello".chars(), 3);
@@ -2317,11 +2280,9 @@ mod tests {
         trie_1.remove("go".chars());
         assert!(trie_1.contains_key("good".chars()));
 
-
         assert_eq!(trie_1, trie_2);
         // assert_ne!(trie_1, trie_3);
     }
-
 
     #[test]
     pub fn trie_test_defragment() {
@@ -2506,7 +2467,8 @@ mod tests {
             );
 
             Ok(())
-        });
+        })
+        .budget(Duration::from_secs(3));
     }
 
     #[test]
@@ -2525,6 +2487,20 @@ mod tests {
             trie.longest_prefix_entry("hellothere".chars()),
             Some(("hello".to_string(), &3))
         );
+    }
+
+    #[test]
+    pub fn test_entry_iter_mut_soundness() {
+        let mut trie = Trie::from([("hello".chars(), 42), ("hey".chars(), 55)]);
+
+        let wow = trie.entries_mut::<String>();
+        for (_, mut val) in wow {
+            *val = 23;
+        }
+
+        for (_, val) in trie.entries::<String>() {
+            assert_eq!(*val, 23);
+        }
     }
 
     #[test]

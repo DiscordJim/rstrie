@@ -12,6 +12,18 @@ assert_eq!(trie.get("hello".chars()), Some(&4));
 assert_eq!(trie.get("hey".chars(), Some(&5)));
 ```
 
+ADD LOCKING TREES?
+
+## Fuzzing
+```bash
+$ cargo install cargo-fuzz
+```
+
+## TODO
+- ARBITRARY
+- SERDE
+- RKYV
+- Add size tests where we add duplicate keys, etc.
 
 ## Examples
 There are several examples contained within the examples folder.

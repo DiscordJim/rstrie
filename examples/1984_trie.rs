@@ -26,7 +26,6 @@ fn find_completion(trie: &Trie<char, ()>, search_str: &str) {
     }
 }
 
-
 /// Parses 1984 into a [Trie].
 fn parse_1984() -> Trie<char, ()> {
     println!(

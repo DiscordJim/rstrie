@@ -1,24 +1,21 @@
 //! This code is mostly identical to the Cloudflare triehard implementation which
 //! can be found here:
 //! https://github.com/cloudflare/trie-hard/blob/main/benches/criterion_bench.rs
-//! 
+//!
 //! The code there is also, by their own admittance, a rip off of the benchmark
 //! suite for [`radix_trie`](https://github.com/michaelsproul/rust_radix_trie/blob/master/Cargo.toml)
-//! 
+//!
 //! Very slight modifications were made to the file in order to make it compatible
 //! with this library.
 
-
 use std::collections::HashSet;
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use rstrie::Trie;
-
 
 const OW_1984: &str = include_str!("../data/1984.txt");
 const SUN_RISING: &str = include_str!("../data/sun-rising.txt");
 const RANDOM: &str = include_str!("../data/random.txt");
-
 
 fn get_big_text() -> Vec<&'static str> {
     OW_1984
@@ -44,7 +41,6 @@ fn get_random_text() -> Vec<&'static str> {
         .collect()
 }
 
-
 fn make_trie<'a>(words: &[&'a str]) -> Trie<char, ()> {
     words.iter().copied().map(|i| (i.chars(), ())).collect()
 }
@@ -55,8 +51,6 @@ fn trie_insert_big(b: &mut Criterion) {
         b.iter(|| make_trie(black_box(&words)))
     });
 }
-
-
 
 fn trie_insert_small(b: &mut Criterion) {
     let words = get_small_text();
@@ -144,10 +138,6 @@ macro_rules! bench_get_percents {
 
 bench_get_percents!([big, small], [100, 75, 50, 25, 10, 5, 2, 1]);
 
-criterion_group!(
-    insert_benches,
-    trie_insert_big,
-    trie_insert_small
-);
+criterion_group!(insert_benches, trie_insert_big, trie_insert_small);
 
 criterion_main!(get_benches, insert_benches);

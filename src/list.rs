@@ -1,21 +1,40 @@
 use std::{
     cmp::Ordering,
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     fmt::Debug,
     ops::{Index, IndexMut},
-    slice::Iter,
+    slice::{GetDisjointMutError, Iter},
     vec::Drain,
 };
 
+/// A Trie node that holds a key fragment, an array of subkeys, and a value.
+/// A key fragment is a type that is part of the greater key type. For instance,
+/// a [char] in sequence forms part of a [String], which allows the Trie keys to be
+/// collected into the greater type.
+///
+/// In the case of a root node then the key will just be [Option::None]. For the sake of
+/// efficient serialization, if the `value` field is [Option::None] then it will not serialize
+/// at all instead of just serializing as `null`,
 #[derive(Debug, Default, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub(crate) struct Node<K, V> {
+    /// The node key
     key: Option<K>,
+    /// The node subkeys, which points to other nodes in the [Slots].
     sub_keys: Vec<NodeIndex>,
+    /// The value of the node. This is only populated if this node terminates
+    /// a key.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     value: Option<V>,
-    // pub(crate) parent: Option<NodeIndex>,
 }
 
 impl<K, V> Node<K, V> {
+    /// Creates a new root node. This just consists
+    /// of a normal node with a `null` key.
     pub const fn root() -> Self {
         Node {
             key: None,
@@ -23,6 +42,8 @@ impl<K, V> Node<K, V> {
             value: None,
         }
     }
+    /// Creates a keyed node. This is more akin to
+    /// what would be considered a "standard" node.
     pub fn keyed(key: K) -> Self {
         Self {
             sub_keys: Vec::default(),
@@ -33,12 +54,16 @@ impl<K, V> Node<K, V> {
 }
 
 impl<K, V> Node<K, V> {
+    /// Gets the node key. This will be [Option::None] in the case
+    /// that we are dealing with a root node.
     pub fn key(&self) -> &Option<K> {
         &self.key
     }
-    pub fn is_root(&self) -> bool {
-        self.key.is_none()
-    }
+    /// Performs a binary search with a function that provides an ordering
+    /// object for key. This can be used to define more complex searches.
+    ///
+    /// For instance, if we would like to order them by position in the list
+    /// instead of a key value if we are doing some sort of walk.
     pub fn get_with<'a, F>(
         &'a self,
         buffer: &'a Slots<K, V>,
@@ -58,61 +83,27 @@ impl<K, V> Node<K, V> {
         Some(&self.sub_keys[result])
     }
 
+    /// Gets the inner value of the node regardless
+    /// of if it is [Option::None] or not.
     pub fn value_mut_unchecked(&mut self) -> &mut V {
         self.value_mut().as_mut().unwrap()
     }
-
-    pub fn sub_keys(&self) -> Iter<'_, NodeIndex> {
+    /// Gets an iterator of all the subkeys as a form
+    /// of [NodeIndex] iterators.
+    pub fn subkeys(&self) -> Iter<'_, NodeIndex> {
         self.sub_keys.iter()
     }
-    pub fn insert_subkey(&mut self, value: NodeIndex, bin: &mut Slots<K, V>) -> Option<NodeIndex>
-    where
-        K: Ord,
-    {
-        match self.bin_search(value, bin) {
-            Ok(valid) => {
-                let old = std::mem::replace(&mut self.sub_keys[valid], value);
-                Some(old)
-            }
-            Err(invalid) => {
-                self.sub_keys.insert(invalid, value);
-                None
-            }
-        }
-    }
+    /// Removes a subkey from the node.
     pub fn remove_subkey(&mut self, result: NodeIndex) -> Option<NodeIndex> {
         if result == NodeIndex::ROOT {
             return Some(NodeIndex::ROOT);
         }
-        let position = self.sub_keys().position(|s| *s == result)?;
+        let position = self.subkeys().position(|s| *s == result)?;
         Some(self.sub_keys.remove(position))
     }
-    // pub fn insert(&mut self, key: K, value: NodeIndex) -> Option<NodeIndex>
-    // where
-    //     K: Ord
-    // {
-
-    //     match self.bin_search(&key) {
-    //         Ok(found) => {
-
-    //             let (_ , old) = std::mem::replace(&mut self.sub_keys[found], (key, value));
-    //             Some(old)
-    //         }
-
-    //         Err(found) => {
-    //             self.sub_keys.insert(found, (key, value));
-
-    //             None
-    //         }
-    //     }
-
-    //     // let old = self.remove(&key);
-
-    //     // self.sub_keys.push((key, value));
-
-    //     // old
-    // }
-    pub fn bin_search(&self, reference: NodeIndex, buffer: &Slots<K, V>) -> Result<usize, usize>
+    /// Performs a binary search over all the node keys, comparing them
+    /// by ordering. This requires that `K` implements [Ord].
+    fn bin_search(&self, reference: NodeIndex, buffer: &Slots<K, V>) -> Result<usize, usize>
     where
         K: Ord,
     {
@@ -120,211 +111,212 @@ impl<K, V> Node<K, V> {
         self.sub_keys
             .binary_search_by(|node| buffer[*node].key.as_ref().unwrap().cmp(key))
     }
-    // pub fn remove(&mut self, key: &K) -> Option<NodeIndex>
-    // where
-    //     K: Ord
-    // {
-    //     Some(self.sub_keys.remove(self.bin_search(key).ok()?).1)
-    // }
+    /// Returns the length of the subkey array, or in other words,
+    /// how many subkeys the specific node has.
     pub fn sub_key_len(&self) -> usize {
         self.sub_keys.len()
     }
+    /// Turns the node into the inner value `V`
     pub fn into_value(self) -> Option<V> {
         self.value
     }
+    /// Returns an immutable reference to the inner value.
     pub fn value(&self) -> &Option<V> {
         &self.value
     }
+    /// Returns a mutable reference to the inner value.
     pub fn value_mut(&mut self) -> &mut Option<V> {
         &mut self.value
     }
-
-    pub fn semantic_equals(&self, other: &Self, list_self: &Slots<K, V>, list_other: &Slots<K, V>) -> bool
+    /// Checks that two subtrees are equal. The arguments are two
+    /// node indexes, one being the node index initiating the semantic search, and
+    /// the other being the root of the subtree to compare against.
+    ///
+    /// Keys are checked for equality, along with subkeys. Since two trees can
+    /// have various levels of fragmentation, a simple node comparison cannot be
+    /// used.
+    pub fn semantic_equals(
+        &self,
+        other: &Self,
+        list_self: &Slots<K, V>,
+        list_other: &Slots<K, V>,
+    ) -> bool
     where
-        K: PartialEq + Debug,
-        V: PartialEq + Debug,
+        K: PartialEq,
+        V: PartialEq,
     {
         // Check to see if the K, V are equal.
         if !(self.key.eq(&other.key) && self.value.eq(&other.value)) {
-            println!("Failed A check at {:?} vs. {:?}", self, other);
             return false;
         }
 
         // Subkey lists must be the same.
         if self.sub_keys.len() != other.sub_keys.len() {
-            println!("Failed length check at {:?} vs. {:?}", self, other);
             return false;
         }
 
         for i in 0..self.sub_keys.len() {
-            
-            if !list_self[self.sub_keys[i]].semantic_equals(&list_other[other.sub_keys[i]], list_self, list_other) {
-                println!("Key comparison failed for keys: {:?} and {:?}", list_self[self.sub_keys[i]].key, list_other[other.sub_keys[i]].key);
+            if !list_self[self.sub_keys[i]].semantic_equals(
+                &list_other[other.sub_keys[i]],
+                list_self,
+                list_other,
+            ) {
                 return false;
             }
         }
 
         true
-
-        
     }
 }
 
+/// The array that holds all the underlying node data. It works
+/// by holding a freelist for filling tombstone slots, and by maintaining
+/// a simple vector. Defragmentation happens when called manually.
+/// 
+/// The slots will always have a root. In practice, this means that it will
+/// never error because the root was indexed and it did not exist. Great
+/// care is put into maintaining the root within the list.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub(crate) struct Slots<K, V> {
+    /// A list of optional slots containing nodes. These may be
+    /// [Option::None] in the case of a tombstone, i.e., a node
+    /// that once was but has since been deleted.
     slots: Vec<Option<Node<K, V>>>,
+    /// A freelist of all the available space within the array.
     free_list: Vec<usize>,
 }
 
-// impl<K, V> PartialEq for Node<K, V>
-// where
-//     K: PartialEq,
-//     V: PartialEq,
-// {
-//     fn eq(&self, other: &Self) -> bool {
-//         self.key.eq(&other.key) && self.sub_keys.eq(&other.sub_keys) && self.value.eq(&other.value)
-//     }
-// }
-
 impl<K, V> PartialEq for Slots<K, V>
 where
-    K: PartialEq + Debug,
-    V: PartialEq + Debug,
-    Node<K, V>: Debug,
+    K: PartialEq,
+    V: PartialEq,
 {
+    /// Performs a semantic equals comparison across the nodes starting from the two roots,
+    /// and checking each subtree recursively.
     fn eq(&self, other: &Self) -> bool {
-        // for (a, b) in self
-        //     .slots
-        //     .iter()
-        //     .filter_map(Option::as_ref)
-        //     .zip(other.slots.iter().filter_map(Option::as_ref))
-        // {
-        //     // for b  in {
-        //     //     println!("HELLO: {:?}", a);
-        //     //     println!("HELLO2: {:?}", b);
-        //     //     if a.ne(b) {
-        //     //         return false;
-        //     //     }
-        //     // }
-        //     if !a.semantic_equals(b, self) {
-        //         println!("Failed at {a:?} and {b:?}");
-        //         return false;
-        //     }
-        // }
-        // return true;
-
-
-        // let mut stack = VecDeque::new();
-        // stack.push_front(NodeIndex::ROOT);
-        // while let Some(op) = stack.pop_front() {
-        //     println!("Node: {:?}", self[op].key);
-        //     for i in self[op].sub_keys() {
-        //         stack.push_front(*i);
-        //     }
-        // }
-
-        self.preorder();
-        println!("SECOND:");
-        other.preorder();
-
         self[NodeIndex::ROOT].semantic_equals(&other[NodeIndex::ROOT], self, other)
     }
 }
 
-
-
-
+/// Represents the index of a node within a slotmap. Requires caution, as
+/// defragmenting the map will cause indices to be invalidated. Special care
+/// is taken to handle this, and this is why the struct is invisible to the
+/// end-developer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct NodeIndex {
-    pub(crate) position: usize,
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize),
+    rkyv(derive(PartialEq, Debug))
+)]
+pub(crate) struct NodeIndex(u64);
+
+impl NodeIndex {
+    /// The root node, which always has an internal index of 0.
+    pub const ROOT: NodeIndex = NodeIndex(0);
 }
 
 impl NodeIndex {
-    pub const ROOT: NodeIndex = NodeIndex { position: 0 };
+    /// Gets the internal position of the node as a [usize]/
+    pub fn position(&self) -> usize {
+        self.0 as usize
+    }
 }
 
 impl<K, V> Slots<K, V> {
+    /// Creates a new [Slots] with a certain amount of capacity
     pub fn with_capacity(cap: usize) -> Self {
         let mut new = Self {
             slots: Vec::with_capacity(cap),
-            free_list: vec![],
+            free_list: vec![]
         };
         new.slots.insert(0, Some(Node::root()));
         new
     }
-    pub fn preorder(&self)
-    where 
-        Node<K, V>: Debug,
-        K: Debug
-    {
-        let mut stack = VecDeque::new();
-        stack.push_back(NodeIndex::ROOT);
-        while let Some(op) = stack.pop_back() {
-            println!("Node: {:?} || {:?}", self[op].key, self[op]);
-            for i in self[op].sub_keys() {
-                stack.push_front(*i);
-            }
-        }
-    }
+    /// Gets the capacity of the [Slots].
     pub fn capacity(&self) -> usize {
         self.slots.capacity()
     }
+    /// Iterates over the optional slots immutably.
     pub fn slot_iter(&self) -> std::slice::Iter<'_, Option<Node<K, V>>> {
         self.slots.iter()
     }
-    pub fn slot_iter_mut(&mut self) -> std::slice::IterMut<'_, Option<Node<K, V>>> {
-        self.slots.iter_mut()
+    /// Iterates over the optional slots mutably.
+    pub fn slot_iter_mut(&mut self) -> SlotsIterMut<'_, K, V> {
+        SlotsIterMut {
+            inner: self.slots.iter_mut()
+        }
     }
+    /// Reserves a certain quantity in the underlying [Vec] that makes
+    /// up the [Slots].
     pub fn reserve(&mut self, quantity: usize) {
         self.slots.reserve(quantity);
     }
+    /// Drains the slots. This is just a thin wrapper around the [Vec::drain]
+    /// method. Returns them as optional slots. Used as a helper method to drain
+    /// the actual tree.
+    /// 
+    /// This is a very heavy method as it shifts all the elements over to the right.
     pub fn drain_slots(&mut self) -> Drain<'_, Option<Node<K, V>>> {
-        self.slots.drain(0..self.slots.len())
+        self.slots.insert(0, Some(Node::root()));
+        self.slots.drain(1..self.slots.len())
     }
+    /// Gets disjoint mutably references from the slots. This is
+    /// returned as a special object called [DisjointIndices] that
+    /// prevents us from having to use `unsafe` code.
+    pub fn get_disjoint_mut<const N: usize>(
+        &mut self,
+        nodes: [NodeIndex; N],
+    ) -> Result<DisjointMutIndices<'_, K, V, N>, GetDisjointMutError> {
+        // Translate all the nodes into positions.
+        let translated: [usize; N] = core::array::from_fn(|i| nodes[i].position());
+        // Gets the disjoint mutables for the underlying [Vec].
+        let r = self.slots.get_disjoint_mut(translated)?;
+        Ok(DisjointMutIndices(r))
+    }
+    /// Inserts a [Node] into the underlying [Vec], returning
+    /// the new [NodeIndex].
     pub fn insert(&mut self, item: Node<K, V>) -> NodeIndex {
         if !self.free_list.is_empty() {
             let avail = self.free_list.pop().unwrap();
             self.slots[avail] = Some(item);
-            NodeIndex { position: avail }
+            NodeIndex(avail as u64)
         } else {
             self.slots.push(Some(item));
-            NodeIndex {
-                position: self.slots.len() - 1,
-            }
+            NodeIndex((self.slots.len() - 1) as u64)
         }
     }
-    pub fn nullify(&mut self, index: NodeIndex) {
-        self.slots[index.position] = None;
-    }
+    /// Removes a node from the underlying [Vec].
     pub fn remove(&mut self, index: NodeIndex) -> Option<Node<K, V>> {
-        if index.position == 0 {
-            // You cannot remove the root node.
-            return None;
+        if index.position() == 0 {
+            // Take the current root out.
+            let root = core::mem::take(&mut self.slots[index.position()]);
+
+            // Swap a fresh root back in.
+            self.slots[index.position()] = Some(Node::root());
+
+            // Return the old root.
+            return root;
         }
-        let pos = &mut self.slots[index.position];
+        let pos = &mut self.slots[index.position()];
         if pos.is_some() {
             // Add the position to the free list.
-            self.free_list.push(index.position);
+            self.free_list.push(index.position());
         }
         pos.take()
     }
+    /// Returns an iterator of node indices alongside the [Node] objects themselves.
     pub fn iter(&self) -> impl Iterator<Item = (NodeIndex, &Node<K, V>)> {
         self.slots
             .iter()
             .enumerate()
             .filter(|(_, f)| f.is_some())
-            .map(|(i, key)| (NodeIndex { position: i }, key.as_ref().unwrap()))
-    }
-    pub fn drain(&mut self) -> impl Iterator<Item = Node<K, V>> {
-        self.clear_root();
-        self.slots
-            .drain(1..self.slots.len())
-            // .enumerate()
-            .flatten()
-    }
-    fn clear_root(&mut self) {
-        self[NodeIndex::ROOT].value_mut().take();
-        self[NodeIndex::ROOT].sub_keys.clear();
+            .map(|(i, key)| (NodeIndex(i as u64), key.as_ref().unwrap()))
     }
     pub fn insert_subkey(&mut self, source: NodeIndex, value: NodeIndex) -> Option<NodeIndex>
     where
@@ -341,9 +333,8 @@ impl<K, V> Slots<K, V> {
             }
         }
     }
-    pub fn remove_subkey(&mut self, source: NodeIndex, to_remove: NodeIndex) -> Option<NodeIndex> {
-        self[source].remove_subkey(to_remove)
-    }
+    /// Clears the underlying vector, reinserting the root node into
+    /// the [Slots].
     pub fn clear(&mut self) {
         self.slots.clear();
         self.slots.insert(0, Some(Node::root()));
@@ -356,9 +347,7 @@ impl<K, V> Slots<K, V> {
         }
         self.slots.shrink_to_fit();
     }
-    /// Defragments the map, please note that this will correct all INTERNAL node indices but
-    /// any existing (living) ones will become invalidated.
-    pub fn defragment(&mut self) {
+    fn get_defrag_map(&mut self) -> HashMap<NodeIndex, NodeIndex> {
         // Create a [HashMap] to keep track of the old positions so we can map
         // them to the new positions.
         let mut remapper = HashMap::<NodeIndex, NodeIndex>::new();
@@ -372,11 +361,17 @@ impl<K, V> Slots<K, V> {
                 drag += 1;
             } else if self.slots[index].is_some() {
                 // If this condition is met, then the drag is trailing behind by more than one.
-                remapper.insert(NodeIndex { position: index }, NodeIndex { position: drag });
+                remapper.insert(NodeIndex(index as u64), NodeIndex(drag as u64));
                 self.slots.swap(index, drag);
                 drag += 1;
             }
         }
+        remapper
+    }
+    /// Defragments the map, please note that this will correct all INTERNAL node indices but
+    /// any existing (living) ones will become invalidated.
+    pub fn defragment(&mut self) {
+        let remapper = self.get_defrag_map();
 
         // We no longer need the free-list!
         self.free_list.clear();
@@ -396,22 +391,68 @@ impl<K, V> Slots<K, V> {
     }
 }
 
+
+/// Returns an iterator of the underlying vector that skips
+/// over the entries that are tombstones.
+pub(crate) struct SlotsIterMut<'a, K, V> {
+    inner: core::slice::IterMut<'a, Option<Node<K, V>>>
+}
+
+impl<'a, K, V> Iterator for SlotsIterMut<'a, K, V> {
+    type Item = &'a mut Node<K, V>;
+
+    /// Skips over the tomstoned entries until we eventually
+    /// get to the next valid value.
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut current = self.inner.next()?;
+        while current.is_none() {
+            current = self.inner.next()?;
+        }
+        current.as_mut()
+    }
+}
+
 impl<K, V> Index<NodeIndex> for Slots<K, V> {
     type Output = Node<K, V>;
     fn index(&self, index: NodeIndex) -> &Self::Output {
-        self.slots[index.position].as_ref().unwrap()
+        self.slots[index.position()].as_ref().unwrap()
     }
 }
 
 impl<K, V> IndexMut<NodeIndex> for Slots<K, V> {
     fn index_mut(&mut self, index: NodeIndex) -> &mut Self::Output {
-        self.slots[index.position].as_mut().unwrap()
+        self.slots[index.position()].as_mut().unwrap()
+    }
+}
+
+/// Represents a set of disjoint mutable indices.
+pub struct DisjointMutIndices<'a, K, V, const N: usize>([&'a mut Option<Node<K, V>>; N]);
+
+impl<'a, K, V, const N: usize> DisjointMutIndices<'a, K, V, N> {
+
+    /// Returns the length of the disjoint mutable indices.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl<'a, K, V, const N: usize> Index<usize> for DisjointMutIndices<'a, K, V, N> {
+    type Output = Option<V>;
+    fn index(&self, index: usize) -> &Self::Output {
+        self.0[index].as_ref().unwrap().value()
+    }
+}
+
+impl<'a, K, V, const N: usize> IndexMut<usize> for DisjointMutIndices<'a, K, V, N> {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        let inner = self.0[index].as_mut().unwrap();
+        &mut inner.value
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::Node;
+    use crate::{Node, NodeIndex};
 
     use super::Slots;
 
@@ -436,7 +477,19 @@ mod tests {
     #[test]
     pub fn remove_root() {
         let mut list = Slots::<char, String>::with_capacity(0);
-        assert!(list.remove(super::NodeIndex { position: 0 }).is_none());
+        assert!(list.remove(super::NodeIndex::ROOT).unwrap().key().is_none());
+
+        
+    }
+
+    #[test]
+    pub fn root_exists_post_drain() {
+        let mut list = Slots::<char, usize>::with_capacity(1);
+        list.insert(Node::keyed('a'));
+        for _ in list.drain_slots() {
+
+        }
+        assert!(list[NodeIndex::ROOT].key().is_none());
     }
 
     fn check_map_integrity_defragmented(map: &Slots<char, String>) {
@@ -448,8 +501,8 @@ mod tests {
             .filter(|f| f.is_some())
             .map(|f| f.as_ref().unwrap())
         {
-            for key in slot.sub_keys() {
-                if map.slots[key.position].is_none() {
+            for key in slot.subkeys() {
+                if map.slots[key.position()].is_none() {
                     panic!("Key reference invalid!");
                 }
             }

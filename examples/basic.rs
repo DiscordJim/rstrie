@@ -5,7 +5,7 @@ pub enum Value {
     A,
     B,
     C,
-    D
+    D,
 }
 
 pub fn main() {

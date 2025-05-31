@@ -1,12 +1,14 @@
 use core::fmt;
-use std::{hint::black_box, net::Ipv4Addr, str::FromStr, time::{Duration, Instant}, u32};
-
-use bitvec::{
-    array::BitArray,
-    order::Msb0,
-    vec::BitVec,
+use std::{
+    hint::black_box,
+    net::Ipv4Addr,
+    str::FromStr,
+    time::{Duration, Instant},
+    u32,
 };
-use rand::{distr::Distribution, Rng};
+
+use bitvec::{array::BitArray, order::Msb0, vec::BitVec};
+use rand::{Rng, distr::Distribution};
 use rand_distr::Zipf;
 use rstrie::Trie;
 
@@ -14,12 +16,9 @@ use rstrie::Trie;
 /// be generating to compose our test.
 pub const ROUTING_TABLE_SIZE: usize = 100_000;
 
-
 /// How many requests we should run through our
 /// routing table.
 pub const SIMULATED_SERVED_REQUESTS: usize = 100_000;
-
-
 
 /// Translates an [Ipv4Addr] into the bits and
 /// returns the composed [Ip].
@@ -38,8 +37,6 @@ impl<'a> PartialEq<&'a str> for Ip {
         *self == other
     }
 }
-
-
 
 impl Ip {
     /// Creates an iterator of boolean values.
@@ -78,19 +75,18 @@ pub fn iterate_bits(targets: &[u8]) -> impl Iterator<Item = bool> {
 }
 
 /// The routing action to implement.
-/// 
+///
 /// These were sort of just determined at random for the sake
-/// of example. 
+/// of example.
 #[derive(PartialEq, Eq, Debug)]
 pub enum RoutingAction {
     Forward(usize),
     Restrict,
     Modification,
-    Dropping
+    Dropping,
 }
 
 impl Distribution<RoutingAction> for Zipf<f32> {
-
     /// Samples a routing action from a Zipfian distribution.
     fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> RoutingAction {
         // We only have four routing actions, so let us restrict the u8
@@ -101,14 +97,13 @@ impl Distribution<RoutingAction> for Zipf<f32> {
             1 => RoutingAction::Dropping,
             2 => RoutingAction::Restrict,
             3 => RoutingAction::Modification,
-            _ => unreachable!()
+            _ => unreachable!(),
         }
-    
     }
 }
 
 /// Converts a [f32] to a unique [u8] value.
-/// 
+///
 /// Obviously there will be significant collisions, but
 /// this maps to a "bigger" space than the naive cast where
 /// we drop all but the last few bits.
@@ -125,7 +120,6 @@ fn unchecked_f32_to_u8(value: f32) -> u8 {
 impl Distribution<Ip> for Zipf<f32> {
     /// Samples a new [Ip] from a Zipfian distribution.
     fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> Ip {
-
         let a: u8 = unchecked_f32_to_u8(self.sample(rng));
         let b: u8 = unchecked_f32_to_u8(self.sample(rng));
         let c: u8 = unchecked_f32_to_u8(self.sample(rng));
@@ -183,20 +177,21 @@ pub fn main() {
     assert_eq!(first[0].0, "192.168.1.253");
     assert_eq!(first[1].0, "192.168.1.254");
 
-
     // We will now build the routing table.
     let zipfian: Zipf<f32> = Zipf::new(100.0, 0.1).unwrap();
 
     let mut trie: Trie<_, _> = Trie::new();
 
-    println!("Building a randomized routing table of size {} from Zipfian distribution.", ROUTING_TABLE_SIZE);
+    println!(
+        "Building a randomized routing table of size {} from Zipfian distribution.",
+        ROUTING_TABLE_SIZE
+    );
     for _ in 0..ROUTING_TABLE_SIZE {
         let ip: Ip = zipfian.sample(&mut rand::rng());
         let action: RoutingAction = zipfian.sample(&mut rand::rng());
         trie.insert(ip.iter(), action);
     }
     println!("Built the routing table!");
-
 
     // Serve a bunch of requests.
     println!("Serving {} requests...", SIMULATED_SERVED_REQUESTS);
@@ -210,6 +205,7 @@ pub fn main() {
     }
     println!("Served requests...");
 
-    let sum = (service_time.iter().sum::<Duration>().as_millis() as f64) / (service_time.len() as f64);
+    let sum =
+        (service_time.iter().sum::<Duration>().as_millis() as f64) / (service_time.len() as f64);
     println!("Average Request Service Time: {sum} ms");
 }
