@@ -20,7 +20,7 @@ rkyv = ["dep:rkyv"]
 [dependencies]
 arbitrary = { version = "1.4.1", optional=true }
 rkyv = { version = "0.8.10", optional = true }
-serde = { version = "1.0.219", optional=true }
+serde = { version = "1.0.219", features=["derive"], optional=true }
 
 [[bench]]
 name = "criterion_bench"
