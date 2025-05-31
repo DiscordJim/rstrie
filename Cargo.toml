@@ -6,7 +6,7 @@ authors = [ "Homer Riva-Cambrin" ]
 description = "A generalized Trie implementation for Rust."
 readme = "README.md"
 homepage = "https://github.com/DiscordJim/rstrie"
-license = "MIT License"
+license = "MIT"
 keywords = [ "trie" ]
 categories = [ "data structure" ]
 
