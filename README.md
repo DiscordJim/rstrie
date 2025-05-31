@@ -32,6 +32,7 @@ assert_eq!(trie.get("hey".chars(), Some(&5)));
 ## Fuzzing
 ```bash
 $ cargo install cargo-fuzz
+$ cargo fuzz run fuzz_target_1
 ```
 
 ## Examples
