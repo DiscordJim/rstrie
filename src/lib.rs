@@ -36,6 +36,18 @@ use list::{DisjointMutIndices, Node, NodeIndex, Slots};
 use crate::list::SlotsIterMut;
 mod list;
 
+/// A [Trie] that is implemented for [String] types. As textual
+/// data is the most common usecase for the [Trie], they get some
+/// special attention.
+///
+/// # Example
+/// ```
+/// use rstrie::StrTrie;
+///
+/// let trie = StrTrie::<usize>::new();
+/// ```
+pub type StrTrie<V> = Trie<char, V>;
+
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
@@ -1248,7 +1260,6 @@ impl<K, V> Trie<K, V> {
             // Both of these share a subtree, but deleting "Yes" should
             // not also delete "Yesman".
             if self.node[sh_index].sub_key_len() == 0 {
-                
                 // Detach the node....
                 self.detach_node(sh_index);
 
@@ -1322,7 +1333,6 @@ impl<K, V> Trie<K, V> {
     {
         match self.internal_walk_with_index(master.into_iter().peekable().by_ref()) {
             Ok(v) => {
-
                 // This node already exists, so replace it and then return
                 // the previous value.
                 let current = self.node[v].value_mut().take();
@@ -1607,22 +1617,430 @@ pub struct ValueIterMut<'a, K, V> {
     values: SlotsIterMut<'a, K, V>,
 }
 
-
 impl<V> Trie<char, V> {
-    /// A special implementation of the [Trie] 
+    /// A special implementation of [Trie::insert] designed specifically for
+    /// strings.
+    ///
+    /// NOTE: This is just a helper method. There are no string-based optimizations
+    /// going on here.
+    ///
+    /// # Example
+    /// ```
+    /// use rstrie::StrTrie;
+    ///
+    /// let mut trie = StrTrie::<usize>::new();
+    /// trie.insert_str("hello", 3);
+    /// ```
     pub fn insert_str(&mut self, key: &str, value: V) -> Option<V> {
         self.insert(key.chars(), value)
     }
+    /// A special implementation of [Trie::remove] designed specifically for
+    /// strings.
+    ///
+    /// NOTE: This is just a helper method. There are no string-based optimizations
+    /// going on here.
+    ///
+    /// # Example
+    /// ```
+    /// use rstrie::StrTrie;
+    ///
+    /// let mut trie = StrTrie::<usize>::new();
+    /// assert!(trie.remove_str("hello").is_none());
+    /// ```
     pub fn remove_str(&mut self, key: &str) -> Option<V> {
         self.remove(key.chars())
     }
+    /// A special implementation of [Trie::contains_key] designed specifically for
+    /// strings.
+    ///
+    /// NOTE: This is just a helper method. There are no string-based optimizations
+    /// going on here.
+    ///
+    /// # Example
+    /// ```
+    /// use rstrie::StrTrie;
+    ///
+    /// let mut trie = StrTrie::<usize>::new();
+    /// trie.insert_str("hello", 3);
+    ///
+    /// assert!(trie.contains_key_str("hello"));
+    /// assert!(!trie.contains_key_str("hey"));
+    ///
+    ///
+    /// ```
+    pub fn contains_key_str(&self, key: &str) -> bool {
+        self.contains_key(key.chars())
+    }
+    /// A special implementation of [Trie::is_prefix] designed specifically for
+    /// strings.
+    ///
+    /// NOTE: This is just a helper method. There are no string-based optimizations
+    /// going on here.
+    ///
+    /// # Example
+    /// ```
+    /// use rstrie::StrTrie;
+    ///
+    /// let mut trie = StrTrie::<usize>::new();
+    /// trie.insert_str("hello", 3);
+    ///
+    /// assert!(trie.is_prefix_str("hello"));
+    /// assert!(trie.is_prefix_str("he"));
+    /// assert!(!trie.is_prefix_str("hellop"));
+    ///
+    ///
+    /// ```
+    pub fn is_prefix_str(&self, key: &str) -> bool {
+        self.is_prefix(key.chars())
+    }
+    /// A special implementation of [Trie::completions] designed specifically for
+    /// strings.
+    ///
+    /// NOTE: This is just a helper method. There are no string-based optimizations
+    /// going on here.
+    ///
+    /// # Example
+    /// ```
+    /// use rstrie::StrTrie;
+    ///
+    /// let mut trie = StrTrie::<usize>::new();
+    /// trie.insert_str("hello", 3);
+    /// trie.insert_str("hey", 1);
+    /// trie.insert_str("james", 2);
+    ///
+    /// let mut values = trie.completions_str("he");
+    /// assert_eq!(values.next().unwrap().0.as_str(), "hello");
+    /// assert_eq!(values.next().unwrap().0.as_str(), "hey");
+    /// ```
+    pub fn completions_str(&self, key: &str) -> CompletionIter<'_, char, V, String> {
+        self.completions(key.chars())
+    }
+    /// A special implementation of [Trie::postfix_search] designed specifically for
+    /// strings.
+    ///
+    /// NOTE: This is just a helper method. There are no string-based optimizations
+    /// going on here.
+    ///
+    /// # Example
+    /// ```
+    /// use rstrie::StrTrie;
+    ///
+    /// let mut trie = StrTrie::<usize>::new();
+    /// trie.insert_str("hello", 3);
+    /// trie.insert_str("hey", 1);
+    /// trie.insert_str("james", 2);
+    ///
+    /// let mut values = trie.postfix_search_str("he");
+    /// assert_eq!(values.next().unwrap().0.as_str(), "llo");
+    /// assert_eq!(values.next().unwrap().0.as_str(), "y");
+    /// ```
+    pub fn postfix_search_str(&self, key: &str) -> PostfixIter<'_, char, V, String> {
+        self.postfix_search(key.chars())
+    }
+    /// A special implementation of [Trie::longest_prefix_entry] designed specifically for
+    /// strings.
+    ///
+    /// NOTE: This is just a helper method. There are no string-based optimizations
+    /// going on here.
+    ///
+    /// # Example
+    /// ```
+    /// use rstrie::StrTrie;
+    ///
+    /// let mut trie = StrTrie::<usize>::new();
+    /// trie.insert_str("hello", 3);
+    /// trie.insert_str("hey", 1);
+    /// trie.insert_str("james", 2);
+    ///
+    /// assert_eq!(trie.longest_prefix_entry_str("hello"), Some(("hello".to_string(), &3)));
+    /// assert_eq!(trie.longest_prefix_entry_str("hellothere"), Some(("hello".to_string(), &3)));
+    /// ```
+    pub fn longest_prefix_entry_str(&self, key: &str) -> Option<(String, &V)> {
+        self.longest_prefix_entry(key.chars())
+    }
+    /// A special implementation of [Trie::longest_prefix] designed specifically for
+    /// strings.
+    ///
+    /// NOTE: This is just a helper method. There are no string-based optimizations
+    /// going on here.
+    ///
+    /// # Example
+    /// ```
+    /// use rstrie::StrTrie;
+    ///
+    /// let mut trie = StrTrie::<usize>::new();
+    /// trie.insert_str("hello", 3);
+    /// trie.insert_str("hey", 1);
+    /// trie.insert_str("james", 2);
+    ///
+    /// assert_eq!(trie.longest_prefix_str("hello"), Some(&3));
+    /// assert_eq!(trie.longest_prefix_str("hellothere"), Some(&3));
+    /// ```
+    pub fn longest_prefix_str(&self, key: &str) -> Option<&V> {
+        self.longest_prefix(key.chars())
+    }
+    /// A special implementation of [Trie::keys] designed specifically for
+    /// strings.
+    ///
+    /// NOTE: This is just a helper method. There are no string-based optimizations
+    /// going on here.
+    ///
+    /// # Example
+    /// ```
+    /// use rstrie::StrTrie;
+    ///
+    /// let mut trie = StrTrie::<usize>::from([
+    ///     ("hello".chars(), 4),
+    ///     ("bye".chars(), 3)
+    /// ]);
+    ///
+    /// let mut key_iter = trie.keys_str();
+    /// assert_eq!(key_iter.next().unwrap(), "bye");
+    /// assert_eq!(key_iter.next().unwrap(), "hello");
+    /// assert!(key_iter.next().is_none());
+    /// ```
+    pub fn keys_str(&self) -> KeyIter<'_, char, V, String> {
+        self.keys()
+    }
+    /// A special implementation of [Trie::into_entries] designed specifically for
+    /// strings.
+    ///
+    /// NOTE: This is just a helper method. There are no string-based optimizations
+    /// going on here.
+    ///
+    /// # Example
+    /// ```
+    /// use rstrie::StrTrie;
+    ///
+    /// let mut trie = StrTrie::<usize>::from([
+    ///     ("hello".chars(), 4),
+    ///     ("bye".chars(), 3)
+    /// ]);
+    ///
+    /// let mut key_iter = trie.into_entries_str();
+    ///
+    /// assert_eq!(key_iter.next().unwrap(), ("bye".to_string(), 3));
+    /// assert_eq!(key_iter.next().unwrap(), ("hello".to_string(), 4));
+    /// assert!(key_iter.next().is_none());
+    /// ```
+    pub fn into_entries_str(self) -> IntoEntryIter<char, V, String> {
+        self.into_entries()
+    }
+    /// A special implementation of [Trie::entries] designed specifically for
+    /// strings.
+    ///
+    /// NOTE: This is just a helper method. There are no string-based optimizations
+    /// going on here.
+    ///
+    /// # Example
+    /// ```
+    /// use rstrie::StrTrie;
+    ///
+    /// let mut trie = StrTrie::<usize>::from([
+    ///     ("hello".chars(), 4),
+    ///     ("bye".chars(), 3)
+    /// ]);
+    ///
+    /// let mut key_iter = trie.entries_str();
+    ///
+    /// assert_eq!(key_iter.next().unwrap(), ("bye".to_string(), &3));
+    /// assert_eq!(key_iter.next().unwrap(), ("hello".to_string(), &4));
+    /// assert!(key_iter.next().is_none());
+    /// ```
+    pub fn entries_str(&self) -> EntryIterRef<'_, char, V, String> {
+        self.entries()
+    }
+    /// A special implementation of [Trie::entries_mut] designed specifically for
+    /// strings.
+    ///
+    /// NOTE: This is just a helper method. There are no string-based optimizations
+    /// going on here.
+    ///
+    /// # Example
+    /// ```
+    /// use rstrie::StrTrie;
+    ///
+    /// let mut trie = StrTrie::<usize>::from([
+    ///     ("hello".chars(), 4),
+    ///     ("bye".chars(), 3)
+    /// ]);
+    ///
+    /// let mut key_iter = trie.entries_mut_str();
+    ///
+    /// assert_eq!(*key_iter.next().unwrap().1, 3);
+    /// assert_eq!(*key_iter.next().unwrap().1, 4);
+    /// assert!(key_iter.next().is_none());
+    /// ```
+    pub fn entries_mut_str(&mut self) -> EntryIterMut<'_, char, V, String> {
+        self.entries_mut()
+    }
+    /// A special implementation of [Trie::get] designed specifically for
+    /// strings.
+    ///
+    /// NOTE: This is just a helper method. There are no string-based optimizations
+    /// going on here.
+    ///
+    /// # Example
+    /// ```
+    /// use rstrie::StrTrie;
+    ///
+    /// let mut tree = StrTrie::<&str>::new();
+    /// tree.insert_str("hello", "world");
+    /// tree.insert_str("hellooo", "world2");
+    /// assert_eq!(*tree.get_str("hello").unwrap(), "world");
+    /// ```
+    pub fn get_str(&self, key: &str) -> Option<&V> {
+        self.get(key.chars())
+    }
+    /// A special implementation of [Trie::get_mut] designed specifically for
+    /// strings.
+    ///
+    /// NOTE: This is just a helper method. There are no string-based optimizations
+    /// going on here.
+    ///
+    /// # Example
+    /// ```
+    /// use rstrie::StrTrie;
+    ///
+    /// let mut tree = StrTrie::<&str>::new();
+    /// tree.insert_str("hello", "world");
+    /// assert_eq!(*tree.get_mut_str("hello").unwrap(), "world");
+    ///
+    /// *tree.get_mut_str("hello").unwrap() = "world2";
+    /// assert_eq!(*tree.get_mut_str("hello").unwrap(), "world2");
+    /// ```
+    pub fn get_mut_str(&mut self, key: &str) -> Option<&mut V> {
+        self.get_mut(key.chars())
+    }
+    /// A special implementation of [Trie::get_disjoint_mut] designed specifically for
+    /// strings.
+    ///
+    /// NOTE: This is just a helper method. There are no string-based optimizations
+    /// going on here.
+    ///
+    /// # Example
+    /// ```
+    /// use rstrie::StrTrie;
+    ///
+    /// let mut tree = StrTrie::<usize>::new();
+    ///
+    /// tree.insert_str("hello", 3);
+    /// tree.insert_str("world", 4);
+    ///
+    /// let mut keys = tree.get_disjoint_mut_str([
+    ///     "hello",
+    ///     "world"
+    /// ]);
+    /// *keys[0].as_mut().unwrap() = 4;
+    /// *keys[1].as_mut().unwrap() = 2;
+    ///
+    /// assert_eq!(tree.get_str("hello"), Some(&4));
+    /// assert_eq!(tree.get_str("world"), Some(&2));
+    /// ```
+    pub fn get_disjoint_mut_str<const N: usize>(
+        &mut self,
+        key: [&str; N],
+    ) -> DisjointMutIndices<'_, char, V, N> {
+        let modded = core::array::from_fn(|i| key[i].chars());
+        self.get_disjoint_mut(modded)
+    }
+    /// A special implementation of [Trie::try_get_disjoint_mut] designed specifically for
+    /// strings.
+    ///
+    /// NOTE: This is just a helper method. There are no string-based optimizations
+    /// going on here.
+    ///
+    /// # Example
+    /// ```
+    /// use rstrie::StrTrie;
+    ///
+    /// let mut tree = StrTrie::<usize>::new();
+    ///
+    /// tree.insert_str("hello", 3);
+    /// tree.insert_str("world", 4);
+    ///
+    /// let mut keys = tree.try_get_disjoint_mut_str([
+    ///     "hello",
+    ///     "world"
+    /// ]).unwrap();
+    /// *keys[0].as_mut().unwrap() = 4;
+    /// *keys[1].as_mut().unwrap() = 2;
+    ///
+    /// assert_eq!(tree.get_str("hello"), Some(&4));
+    /// assert_eq!(tree.get_str("world"), Some(&2));
+    /// ```
+    pub fn try_get_disjoint_mut_str<const N: usize>(
+        &mut self,
+        key: [&str; N],
+    ) -> Result<DisjointMutIndices<'_, char, V, N>, GetDisjointMutError> {
+        let modded = core::array::from_fn(|i| key[i].chars());
+        self.try_get_disjoint_mut(modded)
+    }
+    /// A special implementation of [Trie::get_key_value] designed specifically for
+    /// strings.
+    ///
+    /// NOTE: This is just a helper method. There are no string-based optimizations
+    /// going on here.
+    ///
+    /// # Example
+    /// ```
+    /// use rstrie::StrTrie;
+    ///
+    /// let mut trie = StrTrie::<usize>::new();
+    ///
+    /// trie.insert_str("abc", 1);
+    ///
+    /// assert_eq!(trie.get_key_value_str("abc"), Some(("abc".to_string(), &1)))
+    ///
+    /// ```
+    pub fn get_key_value_str(&self, key: &str) -> Option<(String, &V)> {
+        self.get_key_value(key.chars())
+    }
+    /// A special implementation of [Trie::get_key_value_mut] designed specifically for
+    /// strings.
+    ///
+    /// NOTE: This is just a helper method. There are no string-based optimizations
+    /// going on here.
+    ///
+    /// # Example
+    /// ```
+    /// use rstrie::StrTrie;
+    ///
+    /// let mut trie = StrTrie::<usize>::new();
+    ///
+    /// trie.insert_str("a", 1);
+    ///
+    /// assert_eq!(trie.get_key_value_mut_str("a"), Some(("a".to_string(), &mut 1)));
+    ///
+    /// *trie.get_key_value_mut_str("a").as_mut().unwrap().1 = 2;
+    /// assert_eq!(trie.get_key_value_mut_str("a"), Some(("a".to_string(), &mut 2)));
+    ///
+    ///
+    /// ```
+    pub fn get_key_value_mut_str(&mut self, key: &str) -> Option<(String, &mut V)> {
+        self.get_key_value_mut(key.chars())
+    }
+    /// A special implementation of [Trie::remove_entry] designed specifically for
+    /// strings.
+    ///
+    /// NOTE: This is just a helper method. There are no string-based optimizations
+    /// going on here.
+    ///
+    /// # Example
+    /// ```
+    /// use rstrie::StrTrie;
+    ///
+    /// let mut trie = StrTrie::<usize>::new();
+    ///
+    /// trie.insert_str("a", 2);
+    ///
+    /// assert_eq!(trie.remove_entry_str("a"), Some(("a".to_string(), 2)));
+    ///
+    /// ```
+    pub fn remove_entry_str(&mut self, key: &str) -> Option<(String, V)> {
+        self.remove_entry(key.chars())
+    }
 }
-
-// impl<'a, K, V, J> Iterator for EntryIter<'a, K, V, J>
-// where
-//     J: FromIterator<&'a K>
-// {
-//     type Item = (J, &'a V);
 
 impl<K, V, J> Iterator for IntoEntryIter<K, V, J>
 where
@@ -1847,8 +2265,6 @@ impl<'a, K, V> Iterator for ValueIterMut<'a, K, V> {
     }
 }
 
-
-
 fn map_node_to_value<K, V>(option: Option<&Node<K, V>>) -> Option<&V> {
     let val = option?;
     val.value().as_ref()
@@ -2017,8 +2433,6 @@ impl<K, V, J> Iterator for Drain<'_, K, V, J> {
 #[cfg(feature = "arbitrary")]
 mod arbitrary_trie {
     use core::f32;
-    use std::fmt::Debug;
-
     use arbitrary::{Arbitrary, Unstructured};
 
     use crate::Trie;
@@ -2036,24 +2450,18 @@ mod arbitrary_trie {
             let mut trie = Trie::<K, V>::new();
             let trie_length = u16::arbitrary(u)? as usize;
             let mut buffer = Vec::new();
-            for i in 0..trie_length {
+            for _ in 0..trie_length {
                 let vector: Vec<K> = Vec::arbitrary(u)?;
                 let value = V::arbitrary(u)?;
 
                 buffer.push(Some(vector.clone()));
 
                 trie.insert(vector.into_iter(), value);
-
-                // println!("ADD {i}\t|\t{}\t|\t{:?}", trie.len(), buffer.last());
             }
-
-            // println!("Buffer: {:?}", buffer);
 
             let thres = random_norm_float(u)?;
             for i in 0..buffer.len() {
-                // println!("YO:\t{}\t|\t{}\t|\t{:?}", i, trie.len(), buffer.get_mut(i));
                 if random_norm_float(u)? < thres {
-                    // println!("TRIE: {:?}", trie);
                     let key = buffer.get_mut(i).unwrap().take().unwrap();
                     trie.remove(key.into_iter());
                 }
@@ -2244,7 +2652,7 @@ mod tests {
 
     #[test]
     pub fn test_into_values() {
-        let mut trie: Trie<char, usize> = Trie::from([("".chars(), 1), ("tra".chars(), 2)]);
+        let trie: Trie<char, usize> = Trie::from([("".chars(), 1), ("tra".chars(), 2)]);
 
         let mut values = trie.into_values();
         assert_eq!(values.next(), Some(1));
