@@ -8,7 +8,7 @@ readme = "README.md"
 homepage = "https://github.com/DiscordJim/rstrie"
 license = "MIT"
 keywords = [ "trie" ]
-categories = [ "data structure" ]
+categories = [ "caching", "Data structures" ]
 
 [features]
 serde = [ "dep:serde" ]
