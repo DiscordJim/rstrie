@@ -33,10 +33,11 @@ assert_eq!(trie.get("hey".chars()), Some(&5));
 - No dependencies
 - Full serialization/deseralization support (`serde`, `rkyv`)
 
-
+cargo fuzz run ops fuzz/artifacts/ops/crash-c7261ee3e185eb226e890252921a51f5f4ebaaf3
 ## Fuzzing
 ```bash
 $ cargo install cargo-fuzz
+$ rustup default nightly
 $ cargo fuzz run fuzz_target_1
 ```
 

@@ -42,9 +42,7 @@ mod list;
 pub type StrTrie<V> = Trie<char, V>;
 
 /// A [Trie] is a data structure that is commonly used to
-/// store and retrieve strings. Each node stores a character of the
-/// string, which results in a very memory efficient storage of strings.
-/// This crate takes a slightly different approach, allowing for the building
+/// store and retrieve strings in a memory-efficient manner. This crate takes a slightly different approach, allowing for the building
 /// of Tries from arbitrary types as long as they can satisfy certain properties.
 /// 
 /// In our case, the key must implement the [Ord] type. This is because the nodes
@@ -1178,8 +1176,8 @@ impl<K, V> Trie<K, V> {
     pub fn remove_entry<I, B, J>(&mut self, key: I) -> Option<(J, V)>
     where
         I: IntoIterator<Item = B>,
-        for<'a> J: FromIterator<&'a K>,
-        K: Ord,
+        J: FromIterator<K>,
+        K: Ord + Clone,
         B: Borrow<K>,
     {
         let mut path = vec![];
@@ -1189,10 +1187,10 @@ impl<K, V> Trie<K, V> {
             })
             .ok()?;
 
-        let mut traj_path = trajectory.path.iter().rev().peekable();
+        let traj_path = trajectory.path.last().copied();
 
-        if traj_path.peek().is_some() {
-            let reconstruction = path.into_iter().collect::<J>();
+        if traj_path.is_some() {
+            let reconstruction = path.into_iter().cloned().collect::<J>();
             let value = self.remove_post_walk(&trajectory.path)?;
             Some((reconstruction, value))
         } else {
@@ -1231,7 +1229,6 @@ impl<K, V> Trie<K, V> {
 
         // Remove and then correct the removal.
         self.remove_post_walk(&trajectory.path)
-            .inspect(|_| self.size -= 1)
     }
 
     /// Detaches a node and its subkeys recursively. Since subkeys are
@@ -1256,6 +1253,9 @@ impl<K, V> Trie<K, V> {
     {
         let internal_value = self.node[*path.last()?].value_mut().take();
 
+        if internal_value.is_some() {
+            self.size -= 1;
+        }
         let mut sub_index: isize = (path.len() - 1) as isize;
 
         // Starting at the very end, this travels up the tree, removing
@@ -1274,7 +1274,7 @@ impl<K, V> Trie<K, V> {
             //
             // Both of these share a subtree, but deleting "Yes" should
             // not also delete "Yesman".
-            if self.node[sh_index].sub_key_len() == 0 {
+            if self.node[sh_index].sub_key_len() == 0 && self.node[sh_index].value().is_none() {
                 // Detach the node....
                 self.detach_node(sh_index);
 
@@ -1356,6 +1356,7 @@ impl<K, V> Trie<K, V> {
                 }
                 *self.node[v].value_mut() = Some(value);
 
+ 
                 current
             }
             Err(WalkFailure {
